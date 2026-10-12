@@ -132,7 +132,7 @@ some of the game's logic breaks at 60 (see OPTIONS.md, "Frame rate").
 | `src/gpu/` | the interface to the GPU layer |
 | `src/diag/` | diagnostics (freeze watch, packet statistics, profiling helpers) |
 | `third_party/shadps4/` | shadPS4's video core and shader recompiler, modified (changes marked `sotcport:`) |
-| `third_party/externals/` | libraries built with the project (see `THIRD_PARTY.md`) |
+| `third_party/externals/` | libraries built with the project (see [THIRD_PARTY.md](THIRD_PARTY.md)) |
 | `tools/` | benchmark, PGO training, import listing |
 
 ## Legal
@@ -144,8 +144,8 @@ endorsed by Sony Interactive Entertainment, Bluepoint Games or the shadPS4 proje
 
 ## License
 
-GPL-2.0-or-later (see `LICENSE`), like the shadPS4 code it builds on. Third-party components
-keep their own licenses, listed in `THIRD_PARTY.md`.
+GPL-2.0-or-later (see [LICENSE](LICENCE.md), like the shadPS4 code it builds on. Third-party components
+keep their own licenses, listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Credits
 
