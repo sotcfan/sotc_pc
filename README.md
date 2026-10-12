@@ -59,46 +59,52 @@ Saves and settings go to `~/.local/share/sotcport` (`--data <folder>` changes it
 ## Building and running on Windows
 
 The game calls sotcport's functions with the System V calling convention, which only clang
-supports on Windows, so the build uses MSYS2's **CLANG64** environment.
+supports on Windows, so the build uses the clang toolchain from [MSYS2](https://www.msys2.org)
+(its CLANG64 packages). Every command below is for **PowerShell**.
 
-1. Install MSYS2 and open the **MSYS2 CLANG64** terminal.
-2. Install the tools and libraries:
+1. Install MSYS2 in its default folder, `C:\msys64`.
+2. Install the compiler and the libraries:
 
-   ```sh
-   pacman -S --needed git \
-     mingw-w64-clang-x86_64-{toolchain,cmake,ninja,pkgconf,python} \
-     mingw-w64-clang-x86_64-{vulkan-headers,vulkan-loader,glslang} \
-     mingw-w64-clang-x86_64-{sdl3,fmt,boost,abseil-cpp,xxhash,zlib}
+   ```powershell
+   C:\msys64\usr\bin\pacman.exe -Syu --noconfirm
+   C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm `
+     mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-cmake `
+     mingw-w64-clang-x86_64-ninja mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-python `
+     mingw-w64-clang-x86_64-vulkan-headers mingw-w64-clang-x86_64-vulkan-loader `
+     mingw-w64-clang-x86_64-glslang mingw-w64-clang-x86_64-sdl3 mingw-w64-clang-x86_64-fmt `
+     mingw-w64-clang-x86_64-boost mingw-w64-clang-x86_64-abseil-cpp `
+     mingw-w64-clang-x86_64-xxhash mingw-w64-clang-x86_64-zlib
    ```
 
-3. Build (from the sotcport folder):
+   (If the first command says it updated core packages and must close, run it again.)
+3. In every PowerShell window used to build or run sotcport, put those tools first on the PATH:
 
-   ```sh
+   ```powershell
+   $env:PATH = "C:\msys64\clang64\bin;$env:PATH"
+   ```
+
+4. Build, from the sotcport folder:
+
+   ```powershell
    cmake -B build -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
    cmake --build build
    ```
 
    `-DSOTC_LTO=ON` works as on Linux; PGO is Linux-only.
 
-4. Run it from the same CLANG64 terminal (it has the DLLs on its PATH):
+5. Run (with the PATH of step 3, which also has the DLLs sotcport needs):
 
    ```powershell
-   .\build\sotcport.exe "C:\path\to\your\dump\"
+   $env:SOTC_FPS_LIMIT = "30"; $env:SOTC_DRAW_PIPE = "1"
+   .\build\sotcport.exe "C:\path\to\your\dump" *> sotc_log.txt
    ```
 
-   To run it outside MSYS2, copy the DLLs it needs next to `sotcport.exe`:
-   `ldd build/sotcport.exe | grep -i clang64 | awk '{print $3}' | xargs -I{} cp {} build/`
+   The log (`sotc_log.txt`) is what to attach to a bug report; the console stays empty while it
+   is written. Do not end the dump path with a backslash: `"C:\dump\"` reaches the program as
+   `C:\dump"`.
 
 Saves, settings and the shader cache go to `%LOCALAPPDATA%\sotcport` (`--data <folder>` changes
-it). Set environment variables with `export NAME=value` in the CLANG64 terminal (or
-`set NAME=value` in `cmd`). Not available on Windows: `kill -USR1` thread dumps (use
-`--dump-after`), F11 sampling and PGO.
-
-If something goes wrong, keep the log for a bug report:
-
-```powershell
-.\build\sotcport.exe "C:\path\to\your\dump" 2>&1 | tee sotc_log.txt
-```
+it). Not available on Windows: thread dumps on request (use `--dump-after`), F11 sampling and PGO.
 
 ## Options and controls (both systems)
 
