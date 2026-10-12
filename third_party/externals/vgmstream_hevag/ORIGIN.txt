@@ -1,0 +1,1 @@
+Copied from vgmstream (https://github.com/vgmstream/vgmstream), commit 7dc938fa2f210943b37c7b6511852b516ef432ab: only the hevag_coefs_f table of src/coding/psv_decoder.c. License in COPYING.

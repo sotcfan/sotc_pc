@@ -1,0 +1,7 @@
+# Build directories
+/build*/
+/.cache/
+*.log
+trace*.txt
+compile_commands.json
+/.vscode/

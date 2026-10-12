@@ -1,0 +1,1 @@
+Copied from shadPS4's externals/LibAtrac9 (commit 946e05a9212976626a9f5e52f29c0a7202871f29), only the C/src folder. MIT license (LICENSE).
