@@ -89,6 +89,9 @@ public:
     bool PostEopFence(const AmdGpu::PM4CmdEventWriteEop& packet);
     /// sotcport: the same for an EVENT_WRITE_EOS label write.
     bool PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet);
+    /// sotcport: IT_GET_LOD_STATS of the graphics queue, for the LOD statistics buffer at `base`
+    /// of `size` bytes (see WriteLodStats). Runs on stage B in order with the packets.
+    void GetLodStats(VAddr base, u32 size);
     /// sotcport (two-stage draw pipeline): hands a GPU command processor command (see
     /// Liverpool::SendCommand) to stage B, which runs it in order with the packets. Takes the
     /// callback (it is moved from) and returns true; false with the pipeline off or the option off.
@@ -321,6 +324,17 @@ private:
     std::vector<BoundBuffer> bound_buffers;
     std::vector<VideoCore::ImageId> bound_images;
 
+    /// sotcport: the game streams its textures' finer mip levels in and out by what the GPU
+    /// reports having sampled. Every frame it marks up to 256 textures in their T# (word 6:
+    /// COUNTER_BANK_ID [19:12], LOD_HDW_CNT_EN [20]) and then asks for the counters with
+    /// IT_GET_LOD_STATS (game code 0x53d0f0 marks them, 0x53d620 asks, 0x53cb10 reads). On real
+    /// hardware the texture units count, per bank, the samples and the finest mip level they
+    /// needed. Here: how many times a texture with counting enabled was bound per bank since the
+    /// last request (draws and dispatches), counted on stage B. See WriteLodStats.
+    std::array<u32, 256> lod_stats_binds{};
+    void NoteLodStatsBind(const AmdGpu::Image& tsharp);
+    void WriteLodStats(VAddr base, u32 size);
+
     /// sotcport: the bindings of the last draw, reused when the very next packet is a draw that
     /// binds exactly the same descriptors (see BindResources). Stage B only.
     struct BindMemo {
@@ -341,6 +355,7 @@ private:
         std::vector<Dynamic> dynamics;
         std::vector<BoundBuffer> bound_buffers;        ///< added by BindResources
         std::vector<VideoCore::ImageId> bound_images; ///< added by BindResources
+        std::vector<u8> lod_banks; ///< counter banks of its textures (NoteLodStatsBind)
         std::array<u8, Shader::NUM_BUFFERS> buf_offsets{};
     };
     BindMemo bind_memo;
@@ -373,6 +388,7 @@ private:
     std::vector<PendingWrite> pending_writes; ///< stage A only
     VAddr pending_min = ~VAddr{0}, pending_max = 0;
     u64 pending_checks = 0;
+    u64 pending_last = 0; ///< sotcport: newest position among pending_writes
 };
 
 } // namespace Vulkan

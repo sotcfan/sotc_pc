@@ -4,6 +4,7 @@
 // 5 s when SOTC_PERF is set (gpu_glue.cpp).
 
 #include <cstdint>
+#include <string>
 
 namespace perf {
 
@@ -58,6 +59,11 @@ void Mark(char kind, uint64_t value = 0);
 void NoteVram(uint64_t used, uint64_t pressure, uint64_t critical);
 // Downloaded GPU data about to replace [address, +size): counts the bytes that actually change.
 void NoteDownload(uint64_t address, const uint8_t* data, uint64_t size);
+// SOTC_VERIFY_IMAGES (diagnostics): the game's last few thousand mapping events in the GPU range
+// ('M' mapped, 'U' unmapped, 'P' protection changed), and the ones touching [begin, end) as
+// text, with how long ago they happened.
+void NoteMapEvent(char kind, uint64_t address, uint64_t size);
+std::string DescribeMapEvents(uint64_t begin, uint64_t end);
 
 struct Scope {
     explicit Scope(Slot slot_) : slot{slot_}, start{Enabled() ? Now() : 0} {}

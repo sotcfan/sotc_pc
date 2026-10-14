@@ -48,6 +48,10 @@ s32 MemoryTypeAt(u64 address);
 // [start, end) of every mapping the game has (reservations excluded).
 std::vector<std::pair<u64, u64>> MappedRanges();
 
+// The game's mappings of [address, +size) and every other mapping of the same physical memory
+// (an alias the game may write through), as text. Diagnostics (TextureCache::VerifyImage).
+std::string DescribeAliases(u64 address, u64 size);
+
 // Where the PS4 places its "system reserved" area; the GPU's tessellation ring lives at its end.
 constexpr u64 SystemReservedBase = 0x7'FFFF'C000;
 constexpr u64 SystemReservedSize = 0x7'C000'4000;

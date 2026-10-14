@@ -72,11 +72,20 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_NO_BIND_MEMO=1` | on | Most draws bind exactly the buffers, textures and samplers of the draw before them: their bindings are reused and only the per-draw constants are redone. This turns it off. |
 | `SOTC_NO_TARGET_CACHE=1` | on | Render targets are looked up again only when their registers change. This turns it off. |
 | `SOTC_NO_TEXTURE_CACHE_LOOKUP=1` | on | Textures are looked up in the texture cache again only when the cache's set of images changes. This turns it off. |
+| `SOTC_ASYNC_SUBMIT=1` | off | The Vulkan recording thread ends and submits the command buffers itself, so the thread asking for a submission does not wait for it. Experimental. |
+
+## GPU layer: correctness switches (being tested)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SOTC_NO_REPROTECT=1` | on | A new mapping, or a protection change by the game, over memory a GPU cache watches gets the write protection back (otherwise the game's later writes there go unnoticed). This turns it off. |
+| `SOTC_LOD_STATS=1` | off | Answers the game's texture streaming requests (`IT_GET_LOD_STATS`): textures drawn since the last request are reported as needing their finest level, the others as unused. Without it every texture the game asks about reads as needing its finest level; suspected cause of textures switching detail levels at the last colossus (being tested). |
 
 ## Diagnostics
 
 | Variable | What it does |
 |---|---|
+| `SOTC_VERIFY_IMAGES=1` | Every 64th texture bound, checks that its memory still holds what its last upload read; logs the stale ones (memory changed without the texture cache noticing): which pages changed, the game's mappings there and its recent map/unmap events. Slows the game down. |
 | `SOTC_PERF=1` | Every 5 s, GPU layer counters in the log: time per kind of work, draws and dispatches per second, readbacks, write faults, draw pipeline stalls, frame pacing, VRAM in use. |
 | `SOTC_SPIKES=<ms>` | Logs every frame slower than `<ms>` with what its threads waited for (with `SOTC_PERF=1`). |
 | `SOTC_SCREENSHOTS="60,90"` | Saves screenshots at those seconds (F9 saves one at any time) to `~/.local/share/sotcport/gpu/screenshots`. |

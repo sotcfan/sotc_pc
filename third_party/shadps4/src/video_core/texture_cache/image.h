@@ -161,6 +161,10 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 hash{};
+    /// sotcport (SOTC_VERIFY_IMAGES=1): hash of the guest memory the last upload read, 0 when
+    /// it came from the GPU's copy or is not known (see TextureCache::VerifyImage).
+    u64 upload_hash{};
+    std::vector<u64> upload_page_hashes; ///< sotcport: the same per 4 KiB (SOTC_VERIFY_IMAGES)
 
     struct {
         u32 texture : 1;

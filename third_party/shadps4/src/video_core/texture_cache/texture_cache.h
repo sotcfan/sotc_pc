@@ -148,12 +148,27 @@ public:
     /// Retrieves the depth target with specified properties
     [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
 
+    /// sotcport (SOTC_VERIFY_IMAGES=1, diagnostics): for every 64th call, whether the guest
+    /// memory of an image the GPU is about to use (clean, uploaded from guest memory) still
+    /// holds what its last upload read; logs the ones that changed without an invalidation
+    /// (stale textures). Stage B (or the GPU command thread).
+    void VerifyImage(ImageId image_id);
+
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
         Image& image = slot_images[image_id];
         TouchImage(image);
+        // sotcport: the invalidation count is taken before the image is tracked, not after
+        // (RefreshImage's own snapshot): a game write landing between TrackImage and that
+        // snapshot untracked the image without counting as new, the upload then left it clean,
+        // and once tracked again it kept old contents for good.
+        u64 invalidations_before;
+        {
+            std::scoped_lock lk{image.mutex};
+            invalidations_before = image.invalidations;
+        }
         TrackImage(image_id);
-        RefreshImage(image);
+        RefreshImage(image, invalidations_before);
     }
 
     /// Resolves overlap between existing cache image and pending merged image
@@ -170,7 +185,9 @@ public:
     [[nodiscard]] ImageId ExpandImage(const ImageInfo& info, ImageId image_id);
 
     /// Reuploads image contents.
-    void RefreshImage(Image& image);
+    /// sotcport: `invalidations_before`: Image::invalidations as the caller saw it before
+    /// tracking the image (see UpdateImage); by default, read when the upload starts.
+    void RefreshImage(Image& image, u64 invalidations_before = ~u64{0});
 
     /// Retrieves the sampler that matches the provided S# descriptor.
     [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,

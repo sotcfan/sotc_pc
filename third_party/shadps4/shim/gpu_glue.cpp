@@ -175,6 +175,7 @@ public:
     explicit RasterizerObserver(Vulkan::Rasterizer* rasterizer_) : rasterizer{rasterizer_} {}
 
     void OnMapped(u64 address, u64 size) override {
+        perf::NoteMapEvent('M', address, size); // sotcport (SOTC_VERIFY_IMAGES)
         rasterizer->MapMemory(address, size);
         rasterizer->RegisterMemory(address, size);
         // The game streams in the large mips of a texture by mapping memory into the range it
@@ -184,6 +185,7 @@ public:
         rasterizer->InvalidateMemory(address, size);
     }
     void OnUnmapped(u64 address, u64 size) override {
+        perf::NoteMapEvent('U', address, size); // sotcport (SOTC_VERIFY_IMAGES)
         // Unmapping frees the images and buffers in the range. A game thread doing that while
         // the GPU threads use them (the command thread, or stage B of the two-stage draw
         // pipeline) is a use after free: shadPS4 and bbport do it that way, and it can corrupt
@@ -201,6 +203,7 @@ public:
         }
     }
     void OnProtectionChanged(u64 address, u64 size) override {
+        perf::NoteMapEvent('P', address, size); // sotcport (SOTC_VERIFY_IMAGES)
         rasterizer->RegisterMemory(address, size);
     }
 
@@ -492,6 +495,44 @@ void NoteSrtPatches(uint64_t patches) {
     }
     g_walker_patched++;
     g_walker_patches += patches;
+}
+
+namespace {
+struct MapEvent {
+    std::atomic<uint64_t> address{0};
+    std::atomic<uint64_t> size{0};
+    std::atomic<uint64_t> time{0};
+    std::atomic<char> kind{0};
+};
+constexpr uint32_t MapEventCount = 8192;
+std::array<MapEvent, MapEventCount> g_map_events;
+std::atomic<uint32_t> g_map_event_next{0};
+} // namespace
+
+void NoteMapEvent(char kind, uint64_t address, uint64_t size) {
+    static const bool enabled = std::getenv("SOTC_VERIFY_IMAGES") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    MapEvent& event = g_map_events[g_map_event_next.fetch_add(1) % MapEventCount];
+    event.address = address;
+    event.size = size;
+    event.time = Now();
+    event.kind = kind;
+}
+
+std::string DescribeMapEvents(uint64_t begin, uint64_t end) {
+    const uint64_t now = Now();
+    std::string text;
+    for (const MapEvent& event : g_map_events) {
+        const uint64_t address = event.address;
+        const uint64_t size = event.size;
+        if (event.kind && address < end && begin < address + size) {
+            text += fmt::format(" {}:{:#x}-{:#x}@-{}ms", event.kind.load(), address,
+                                address + size, (now - event.time) / 1000000);
+        }
+    }
+    return text.empty() ? " none" : text;
 }
 
 void NoteDownload(uint64_t address, const uint8_t* data, uint64_t size) {

@@ -66,6 +66,17 @@ if [ "${SOTC_BENCH_ROUTE:-}" = walk ]; then
     window_to=190
 fi
 
+# The configuration the game is played with: the two-stage draw pipeline and asynchronous
+# readbacks (OPTIONS.md), uncapped unless SOTC_FPS_LIMIT is given. Set any of them in the
+# environment to run otherwise.
+export SOTC_DRAW_PIPE=${SOTC_DRAW_PIPE-1} SOTC_ASYNC_READBACK=${SOTC_ASYNC_READBACK-1}
+if [ -z "${SOTC_FPS_LIMIT:-}" ]; then
+    export SOTC_UNCAPPED=${SOTC_UNCAPPED-1}
+fi
+
+# SOTC_BENCH_SHOTS=<s,s,...> takes the screenshots at other times.
+shots=${SOTC_BENCH_SHOTS:-$shots}
+
 # The benchmark's own data folder (see above).
 data=${SOTC_BENCH_DATA:-$HOME/.local/share/sotcport-bench}
 player_data=$HOME/.local/share/sotcport

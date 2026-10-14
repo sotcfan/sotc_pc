@@ -17,6 +17,8 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "perf_temp.h" // sotcport TEMP
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 
 #ifndef _WIN64
@@ -98,8 +100,75 @@ struct PageManager::Impl {
     virtual ~Impl() = default;
 
     virtual void OnMap(VAddr address, size_t size) {
-        // No-op
         EnsurePages(address, address + size);
+        ReapplyProtection(address, size);
+    }
+
+    // sotcport: gives the pages of [address, +size) that something still watches the host
+    // protection their state says they have. A new mapping (or the game's sceKernelMprotect)
+    // replaces the host protection of its pages, and pages can be watched while nothing is
+    // mapped there: an image spanning a streamed texture's unmapped mips is tracked whole. Such
+    // pages came back writable with their state still saying "protected", so a later Track
+    // changed no protection and the game's writes there went unnoticed: textures kept old
+    // contents (colored blocks, 2026-10-14). The page locks are held until the protection is
+    // applied, as in UpdatePageWatchers, so no other change can land in between.
+    // SOTC_NO_REPROTECT=1 turns this off (A/B).
+    void ReapplyProtection(VAddr address, size_t size) {
+        static const bool disabled = std::getenv("SOTC_NO_REPROTECT") != nullptr;
+        if (disabled || size == 0) {
+            return;
+        }
+        const u64 page_start = address >> PM_PAGE_BITS;
+        const u64 page_end = Common::DivCeil(address + size, PM_PAGE_SIZE);
+        u64 range_begin = 0;
+        u64 range_pages = 0;
+        Core::MemoryPermission range_perms{};
+        u64 reprotected = 0;
+        const auto flush = [&] {
+            if (range_pages > 0) {
+                Protect(range_begin << PM_PAGE_BITS, range_pages << PM_PAGE_BITS, range_perms);
+                reprotected += range_pages;
+                range_pages = 0;
+            }
+        };
+        for (u64 page = page_start; page != page_end; ++page) {
+            PageState* state = cached_pages.find(page);
+            if (!state) {
+                flush();
+                continue;
+            }
+            locks[page].lock();
+            if (state->num_write_watchers == 0 && state->num_read_watchers == 0) {
+                flush();
+                continue;
+            }
+            const auto perms = state->Perms();
+            if (range_pages > 0 && perms != range_perms) {
+                flush();
+            }
+            if (range_pages == 0) {
+                range_begin = page;
+                range_perms = perms;
+            }
+            ++range_pages;
+        }
+        flush();
+        for (u64 page = page_start; page != page_end; ++page) {
+            if (auto* lock = locks.find(page)) {
+                lock->unlock();
+            }
+        }
+        // TEMP: how often it finds watched pages (SOTC_PERF).
+        if (reprotected && perf::Enabled()) {
+            static std::atomic<u64> total{0};
+            static std::atomic<u32> calls{0};
+            total += reprotected;
+            if (const u32 n = ++calls; n <= 10 || n % 100 == 0) {
+                LOG_INFO(Render, "protection reapplied to {} watched pages of {:#x}-{:#x} "
+                                 "({} calls, {} pages so far)",
+                         reprotected, address, address + size, n, total.load());
+            }
+        }
     }
 
     virtual void OnUnmap(VAddr address, size_t size) {

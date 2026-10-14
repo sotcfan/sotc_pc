@@ -1078,7 +1078,11 @@ void Rasterizer::NotePendingWrite(VAddr address, u64 size) {
     if (address == 0 || size == 0) {
         return;
     }
-    const u64 position = draw_pipe->Head();
+    // sotcport: past the start of the packet about to be committed: Reached() only once stage B
+    // has finished it (it was its start, so a write counted as done while stage B was still
+    // running the packet that writes, before it marked the bytes).
+    const u64 position = draw_pipe->Head() + 1;
+    pending_last = std::max(pending_last, position);
     const VAddr end = address + size;
     for (auto& write : pending_writes) {
         if (address <= write.end && write.begin <= end) {
@@ -1098,6 +1102,14 @@ void Rasterizer::NotePendingWrite(VAddr address, u64 size) {
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     if (!draw_pipe || pending_writes.empty() || address >= pending_max ||
         address + size <= pending_min) {
+        return false;
+    }
+    // sotcport: stage B past the newest of them: none is pending (one check, no scan; the
+    // scans were ~7% of this thread while walking).
+    if (draw_pipe->Reached(pending_last)) {
+        pending_writes.clear();
+        pending_min = ~VAddr{0};
+        pending_max = 0;
         return false;
     }
     // Now and then drop the writes stage B has passed: the bounds shrink.
@@ -1300,6 +1312,76 @@ bool Rasterizer::PostEopFence(const AmdGpu::PM4CmdEventWriteEop& packet) {
         pending_fences.back().position = draw_pipe->Head();
     }
     return true;
+}
+
+void Rasterizer::NoteLodStatsBind(const AmdGpu::Image& tsharp) {
+    const u8 bank = static_cast<u8>(tsharp.counter_bank_id);
+    ++lod_stats_binds[bank];
+    if (memo_recording) {
+        bind_memo.lod_banks.push_back(bank);
+    }
+}
+
+void Rasterizer::GetLodStats(VAddr base, u32 size) {
+    // SOTC_LOD_STATS=1 answers the requests (WriteLodStats); without it the buffer is left as
+    // the game cleared it, as before (every texture then reads as needing its finest level).
+    static const bool enabled = std::getenv("SOTC_LOD_STATS") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    if (draw_pipe && OnStageA()) {
+        // The counts are taken by stage B as it binds; the label the game writes next is
+        // signalled by stage B after this (or after stage B is drained).
+        struct Request {
+            VAddr base;
+            u32 size;
+        } const request{base, size};
+        PostTask(
+            [](Rasterizer& self, const u8* payload) {
+                Request r;
+                std::memcpy(&r, payload, sizeof(r));
+                self.WriteLodStats(r.base, r.size);
+            },
+            &request, sizeof(request));
+        return;
+    }
+    WriteLodStats(base, size);
+}
+
+void Rasterizer::WriteLodStats(VAddr base, u32 size) {
+    // The buffer the game reads (0x53cb10): after a 0x40 byte header (unused by the game), two
+    // slots of 256 u64 counters, one per bank, which the game reads alternately (the packet
+    // carries the buffer size minus 0x20). Each counter: bits [59:56] the finest mip level
+    // sampled (0xf: not sampled at all), bits [55:32] how many samples (used as the texture's
+    // priority). Without the texture units' counts, a texture bound since the last request is
+    // reported as needing its finest level (0) with its bind count; one never bound, as not
+    // sampled, so the game can drop its finer levels. Both slots get the same counters.
+    std::array<u64, 256> counters;
+    u32 banks_bound = 0;
+    for (u32 bank = 0; bank < counters.size(); ++bank) {
+        const u32 binds = lod_stats_binds[bank];
+        counters[bank] = binds ? u64{std::min<u32>(binds, 0xffffff)} << 32 : u64{0xf} << 56;
+        banks_bound += binds ? 1 : 0;
+    }
+    lod_stats_binds.fill(0);
+    // With SOTC_PERF, every 600th request (~10 s): how many banks had a texture bound.
+    static u32 requests = 0;
+    if (perf::Enabled() && ++requests % 600 == 0) {
+        LOG_INFO(Render_Vulkan, "LOD statistics: {} of 256 counter banks bound", banks_bound);
+    }
+    constexpr u32 Header = 0x40;
+    constexpr u32 SlotBytes = sizeof(counters);
+    auto* memory = Core::Memory::Instance();
+    for (u32 slot = 0; slot < 2 && Header + (slot + 1) * SlotBytes <= size + 0x20; ++slot) {
+        void* dst = reinterpret_cast<void*>(base + Header + slot * SlotBytes);
+        if (!memory->TryWriteBacking(dst, counters.data(), SlotBytes)) {
+            static bool logged = false;
+            if (!std::exchange(logged, true)) {
+                LOG_WARNING(Render_Vulkan, "LOD statistics buffer {:#x} not writable", base);
+            }
+            return;
+        }
+    }
 }
 
 bool Rasterizer::PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet) {
@@ -1523,7 +1605,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     bool memo_eligible = false;
     const bool memo_valid = bind_memo.packet + 1 == bind_packet &&
                             bind_memo.texture_generation == texture_cache.RegistryGeneration();
-    if (BindKeyMatches(pipeline, memo_eligible) && memo_valid) {
+    const bool memo_hit = BindKeyMatches(pipeline, memo_eligible) && memo_valid;
+    if (memo_hit) {
         ReuseBindings(pipeline);
         bind_memo.packet = bind_packet;
         return true;
@@ -1531,6 +1614,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     bind_memo.packet = ~u64{0};
     memo_recording = memo_eligible;
     bind_memo.dynamics.clear();
+    bind_memo.lod_banks.clear();
     const size_t first_bound_buffer = bound_buffers.size();
     const size_t first_bound_image = bound_images.size();
     memo_first_bound_buffer = first_bound_buffer;
@@ -1717,6 +1801,9 @@ void Rasterizer::ReuseBindings(const Pipeline* pipeline) {
         bound_images.push_back(image_id);
         texture_cache.GetImage(image_id).binding.is_bound = 1u;
         texture_cache.UseFoundImage(image_id);
+    }
+    for (const u8 bank : bind_memo.lod_banks) {
+        ++lod_stats_binds[bank];
     }
 }
 
@@ -2187,6 +2274,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     u32 num_images{};
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        if (tsharp.lod_hw_cnt_en) {
+            NoteLodStatsBind(tsharp);
+        }
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         const u32 num_bindings = image_desc.NumBindings(stage);
@@ -2290,6 +2380,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
+            texture_cache.VerifyImage(image_id); // sotcport (SOTC_VERIFY_IMAGES)
             const auto binding = image.binding;
 
             // The image is either bound as storage in a separate descriptor or bound as render

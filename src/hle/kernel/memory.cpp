@@ -526,6 +526,50 @@ public:
         }
     }
 
+    std::string DescribeAliases(u64 address, u64 size) {
+        std::shared_lock<TrackedMutex> lock{mutex_};
+        std::string text;
+        const auto describe = [&](u64 start, const Vma& vma) {
+            text += std::format(" [{:#x}-{:#x} phys {:#x} prot {:#x} {} \"{}\"]", start,
+                                start + vma.size, vma.physical, vma.prot,
+                                vma.type == VmaType::Flexible ? "flexible" : "direct", vma.name);
+        };
+        // The physical ranges behind [address, +size).
+        std::vector<std::pair<u64, u64>> physical;
+        auto it = vmas_.upper_bound(address);
+        if (it != vmas_.begin()) {
+            --it;
+        }
+        text += "mapped as:";
+        for (; it != vmas_.end() && it->first < address + size; ++it) {
+            const Vma& vma = it->second;
+            if (it->first + vma.size <= address || vma.type == VmaType::Reserved) {
+                continue;
+            }
+            describe(it->first, vma);
+            const u64 from = std::max(address, it->first);
+            const u64 to = std::min(address + size, it->first + vma.size);
+            physical.emplace_back(vma.physical + (from - it->first),
+                                  vma.physical + (to - it->first));
+        }
+        text += "; aliases:";
+        for (const auto& [start, vma] : vmas_) {
+            if (vma.type == VmaType::Reserved) {
+                continue;
+            }
+            if (start < address + size && address < start + vma.size) {
+                continue; // the range itself
+            }
+            for (const auto& [lo, hi] : physical) {
+                if (vma.physical < hi && lo < vma.physical + vma.size) {
+                    describe(start, vma);
+                    break;
+                }
+            }
+        }
+        return text;
+    }
+
     std::vector<std::pair<u64, u64>> MappedRanges() {
         std::scoped_lock<TrackedMutex> lock{mutex_};
         std::vector<std::pair<u64, u64>> ranges;
@@ -1027,6 +1071,10 @@ std::string DescribeMemoryLock() {
 
 std::vector<std::pair<u64, u64>> MappedRanges() {
     return Manager().MappedRanges();
+}
+
+std::string DescribeAliases(u64 address, u64 size) {
+    return Manager().DescribeAliases(address, size);
 }
 
 HLE_FUNCTION("libkernel", "sceKernelGetDirectMemorySize", sceKernelGetDirectMemorySize);

@@ -1190,7 +1190,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING_ONCE_SHADOW(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS"); // sotcport: once
+                // sotcport: the game's texture streaming feedback (Rasterizer::GetLodStats). Body:
+                // the buffer size minus 0x20, then its address: [37:6] and [39:38] (low bits of
+                // the third dword; the rest of it, 0xbfc00 from the game, is left alone).
+                const auto* body = reinterpret_cast<const u32*>(header + 1);
+                const VAddr base = (VAddr{body[1]} << 6) | (VAddr{body[2] & 3u} << 38);
+                if (rasterizer) {
+                    rasterizer->GetLodStats(base, body[0]);
+                }
                 break;
             }
             case PM4ItOpcode::CondExec: {

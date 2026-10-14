@@ -10,6 +10,7 @@
 #include "common/hash.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "hle/kernel/gpu_memory.h" // sotcport: DescribeAliases (SOTC_VERIFY_IMAGES)
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -748,7 +749,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     return image.FindView(desc.view_info, false);
 }
 
-void TextureCache::RefreshImage(Image& image) {
+void TextureCache::RefreshImage(Image& image, u64 invalidations_before) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
@@ -779,8 +780,7 @@ void TextureCache::RefreshImage(Image& image) {
 
     perf::Scope perf_scope{perf::TextureUpload}; // sotcport TEMP
     // sotcport: invalidations seen before guest memory is read (see the end).
-    u64 invalidations_before;
-    {
+    if (invalidations_before == ~u64{0}) {
         std::scoped_lock lk{image.mutex};
         invalidations_before = image.invalidations;
     }
@@ -821,6 +821,12 @@ void TextureCache::RefreshImage(Image& image) {
 
     scheduler.EndRendering();
 
+    // sotcport (SOTC_VERIFY_IMAGES): ObtainBufferForImage takes the GPU's copy of the memory
+    // when any of its pages is GPU-modified.
+    static const bool verify = std::getenv("SOTC_VERIFY_IMAGES") != nullptr;
+    const bool from_gpu_copy =
+        verify && buffer_cache.IsRegionGpuModified(image.info.guest_address, image.info.guest_size);
+
     const auto [in_buffer, in_offset] =
         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
     const auto [buffer, offset] = tile_manager.DetileImage(in_buffer, in_offset, image.info);
@@ -829,16 +835,93 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    if (verify) {
+        image.upload_hash = from_gpu_copy ? 0
+                                          : Core::Memory::Instance()->HashBacking(
+                                                image.info.guest_address, image.info.guest_size);
+        image.upload_page_hashes.clear();
+        if (image.upload_hash) {
+            for (u64 at = 0; at < image.info.guest_size; at += 4096) {
+                image.upload_page_hashes.push_back(Core::Memory::Instance()->HashBacking(
+                    image.info.guest_address + at, std::min<u64>(4096, image.info.guest_size - at)));
+            }
+        }
+    }
 
     // sotcport: the upload cleared the dirty flags, but another thread may have marked the
     // image modified while its memory was being read (the game mapping the large mips of a
     // streamed texture, or writing them): keep that mark, or the GPU keeps the old contents
     // (black areas: mips 0-2 left zero, seen on 2026-10-10).
-    // SOTC_NO_UPLOAD_GUARD=1 turns this off (diagnostics).
+    // (See also the end of UpdateImage.) SOTC_NO_UPLOAD_GUARD=1 turns this off (diagnostics).
     static const bool guard = std::getenv("SOTC_NO_UPLOAD_GUARD") == nullptr;
     std::scoped_lock lk{image.mutex};
     if (guard && image.invalidations != invalidations_before) {
         image.flags |= ImageFlagBits::CpuDirty;
+    }
+}
+
+void TextureCache::VerifyImage(ImageId image_id) {
+    static const bool verify = std::getenv("SOTC_VERIFY_IMAGES") != nullptr;
+    static u32 calls = 0;
+    if (!verify || ++calls % 64 != 0) {
+        return;
+    }
+    Image& image = slot_images[image_id];
+    if (image.upload_hash == 0 ||
+        True(image.flags & (ImageFlagBits::Dirty | ImageFlagBits::GpuModified))) {
+        return;
+    }
+    u64 invalidations;
+    {
+        std::scoped_lock lk{image.mutex};
+        invalidations = image.invalidations;
+    }
+    const u64 hash =
+        Core::Memory::Instance()->HashBacking(image.info.guest_address, image.info.guest_size);
+    if (hash == image.upload_hash) {
+        return;
+    }
+    std::scoped_lock lk{image.mutex};
+    if (image.invalidations != invalidations || True(image.flags & ImageFlagBits::Dirty)) {
+        return; // written while being hashed, and the write was noticed
+    }
+    image.upload_hash = 0; // once per upload
+    static u32 stale = 0;
+    if (++stale <= 40 || stale % 100 == 0) {
+        LOG_WARNING(Render_Vulkan,
+                    "stale texture {:#x}-{:#x} ({}x{}, {} levels, {}): its memory changed since "
+                    "the upload without an invalidation ({} so far); tracked {:#x}-{:#x}, "
+                    "{} invalidations; {}",
+                    image.info.guest_address, image.info.guest_address + image.info.guest_size,
+                    image.info.size.width, image.info.size.height, image.info.resources.levels,
+                    vk::to_string(image.info.pixel_format), stale, image.track_addr,
+                    image.track_addr_end, image.invalidations,
+                    hle::kernel::DescribeAliases(image.info.guest_address, image.info.guest_size));
+        // Which pages changed, and the mapping events there.
+        std::string changed;
+        u32 ranges = 0;
+        for (u64 i = 0; i < image.upload_page_hashes.size() && ranges < 4; ++i) {
+            const VAddr page = image.info.guest_address + i * 4096;
+            if (Core::Memory::Instance()->HashBacking(
+                    page, std::min<u64>(4096, image.info.guest_size - i * 4096)) ==
+                image.upload_page_hashes[i]) {
+                continue;
+            }
+            u64 j = i + 1;
+            while (j < image.upload_page_hashes.size() &&
+                   Core::Memory::Instance()->HashBacking(
+                       image.info.guest_address + j * 4096,
+                       std::min<u64>(4096, image.info.guest_size - j * 4096)) !=
+                       image.upload_page_hashes[j]) {
+                ++j;
+            }
+            const VAddr end = image.info.guest_address + j * 4096;
+            changed += fmt::format("\n    changed {:#x}-{:#x} (+{:#x}); events:{}", page, end,
+                                   i * 4096, perf::DescribeMapEvents(page, end));
+            ++ranges;
+            i = j;
+        }
+        LOG_WARNING(Render_Vulkan, "stale texture {:#x}:{}", image.info.guest_address, changed);
     }
 }
 
