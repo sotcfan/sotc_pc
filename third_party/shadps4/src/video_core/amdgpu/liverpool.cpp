@@ -248,8 +248,8 @@ void Liverpool::SignalReleaseMem(const PM4CmdReleaseMem& packet, u32 pipe_id) {
 }
 
 // sotcport: whether a fence writing [dst, +bytes) can change commands this thread has yet to
-// read in [begin, end), the command buffer being processed; `current` is the packet being
-// processed. The game allocates its labels from its command buffers (inside NOPs, ahead of the
+// read in [begin, end), the command buffer being processed; `current` is where the packets not
+// read yet start (the end of the packet being processed, which has been read already). The game allocates its labels from its command buffers (inside NOPs, ahead of the
 // packets that use them), so ~9,000 fences a second land there: always behind the current packet
 // in the benchmark scene (measured 2026-10-14). Those cannot change what is left to read and are
 // signalled by stage B in order; a command buffer read again later drains first if a fence still
@@ -983,7 +983,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // the benchmark scene used to drain). Not a GDS store: it reads the GPU's GDS.
                 if (rasterizer &&
                     event_eos->command == PM4CmdEventWriteEos::Command::SignalFence &&
-                    !WritesUnreadCommands(cmd_begin, cmd_end, dcb.data(),
+                    !WritesUnreadCommands(cmd_begin, cmd_end,
+                                          dcb.data() + header->type3.NumWords() + 1,
                                           reinterpret_cast<VAddr>(event_eos->Address()),
                                           sizeof(u32)) &&
                     rasterizer->PostEosFence(*event_eos)) {
@@ -1014,9 +1015,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto fence_dst = reinterpret_cast<VAddr>(event_eop->Address<u8>());
                 static const bool post_in_cmdbuf =
                     std::getenv("SOTC_PIPE_FENCE_IN_CMDBUF") != nullptr; // TEMP experiment
+                // The game's labels sit right before the packet that writes them: a 32-bit one
+                // ends where this packet starts (~600/s drained while counted as 8 bytes).
+                const u32 fence_bytes =
+                    event_eop->data_sel == DataSelect::Data32Low ? sizeof(u32) : sizeof(u64);
                 const bool patches_commands =
                     !post_in_cmdbuf &&
-                    WritesUnreadCommands(cmd_begin, cmd_end, dcb.data(), fence_dst, sizeof(u64));
+                    WritesUnreadCommands(cmd_begin, cmd_end,
+                                         dcb.data() + header->type3.NumWords() + 1, fence_dst,
+                                         fence_bytes);
                 if (rasterizer && !patches_commands && rasterizer->PostEopFence(*event_eop)) {
                     break;
                 }
@@ -1485,8 +1492,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // there are what the queues' WAIT_REG_MEMs poll; see OTIMIZACAO notes).
             static const bool post_in_cmdbuf = std::getenv("SOTC_PIPE_FENCE_IN_CMDBUF") != nullptr;
             const bool patches_commands =
-                !post_in_cmdbuf && WritesUnreadCommands(base_addr, base_addr + acb_size, acb.data(),
-                                                        fence_dst, sizeof(u64));
+                !post_in_cmdbuf &&
+                WritesUnreadCommands(base_addr, base_addr + acb_size,
+                                     acb.data() + header->type3.NumWords() + 1, fence_dst,
+                                     release_mem->data_sel == DataSelect::Data32Low
+                                         ? sizeof(u32)
+                                         : sizeof(u64));
             if (rasterizer && !patches_commands &&
                 rasterizer->PostReleaseMem(*release_mem, queue.pipe_id)) {
                 break;

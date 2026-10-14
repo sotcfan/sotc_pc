@@ -380,11 +380,14 @@ static std::pair<u32, u32> GetDrawOffsets(const AmdGpu::Regs& regs, const Shader
 }
 
 void Rasterizer::EliminateFastClear() {
-    auto& col_buf = GpuRegs().color_buffers[0];
+    EliminateFastClear(GpuRegs().color_buffers[0], CbExtents()[0]);
+}
+
+void Rasterizer::EliminateFastClear(const AmdGpu::ColorBuffer& col_buf, AmdGpu::CbDbExtent hint) {
     if (!col_buf || !col_buf.info.fast_clear) {
         return;
     }
-    VideoCore::TextureCache::ImageDesc desc(col_buf, CbExtents()[0]);
+    VideoCore::TextureCache::ImageDesc desc(col_buf, hint);
     const auto image_id = texture_cache.FindImage(desc);
     const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
     if (!texture_cache.IsMetaCleared(col_buf.CmaskAddress(), col_buf.view.slice_start)) {
@@ -400,6 +403,38 @@ void Rasterizer::EliminateFastClear() {
                                  col_buf.CmaskAddress()));
     runtime.ClearImage(&image, desc.view_info.range, clear_value);
     ScopeMarkerEnd();
+}
+
+bool Rasterizer::PostFilterDraw() {
+    // sotcport (two-stage draw pipeline): FilterDraw's passes ran on this thread after stage B
+    // ran dry, ~1,300 times a second while walking, all of them fast clear eliminations (one per
+    // render target the game resolves). Those only need color buffer 0 and its extent: stage B
+    // runs them in order instead. The passes that do nothing are skipped here.
+    const auto& regs = GpuRegs();
+    using Mode = AmdGpu::ColorControl::OperationMode;
+    const auto mode = regs.color_control.mode;
+    if (mode == Mode::FmaskDecompress || regs.primitive_type == AmdGpu::PrimitiveType::None) {
+        return true;
+    }
+    if (mode != Mode::EliminateFastClear || !OnStageA()) {
+        return false;
+    }
+    const auto& col_buf = regs.color_buffers[0];
+    if (!col_buf || !col_buf.info.fast_clear) {
+        return true;
+    }
+    struct Payload {
+        AmdGpu::ColorBuffer col_buf;
+        AmdGpu::CbDbExtent hint;
+    };
+    const Payload payload{col_buf, CbExtents()[0]};
+    PostTask(
+        [](Rasterizer& self, const u8* data) {
+            const auto& task = *reinterpret_cast<const Payload*>(data);
+            self.EliminateFastClear(task.col_buf, task.hint);
+        },
+        &payload, sizeof(payload));
+    return true;
 }
 
 bool Rasterizer::FilterDrawPasses() const {
@@ -431,6 +466,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         // FilterDraw handles itself (fast clear elimination, resolve, depth copy) run here,
         // after stage B has run dry.
         if (!FilterDrawPasses()) {
+            if (PostFilterDraw()) {
+                return;
+            }
             DrainDrawPipe(DrawPipe::ReasonFilterDraw);
             scheduler.PopPendingOperations();
             FilterDraw();
@@ -524,6 +562,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
     if (UseDrawPipe()) {
         if (!FilterDrawPasses()) {
+            if (PostFilterDraw()) {
+                return;
+            }
             DrainDrawPipe(DrawPipe::ReasonFilterDraw);
             scheduler.PopPendingOperations();
             FilterDraw();

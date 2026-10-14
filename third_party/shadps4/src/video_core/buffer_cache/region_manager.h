@@ -194,6 +194,27 @@ public:
         }
     }
 
+    /// sotcport: whether every page of the range has the bit set (see ForEachUploadRange).
+    template <Type type>
+    bool IsRegionFullyModified(u64 offset, u64 size) noexcept {
+        auto& state = GetRegionBits<type>();
+        const auto [start_word, start_page, end_word, end_page] = GetBounds(offset, size);
+        const auto [start_mask, end_mask] = GetMasks(start_page, end_page);
+        if (start_word == end_word) [[likely]] {
+            const u64 mask = start_mask & end_mask;
+            return (state[start_word] & mask) == mask;
+        }
+        if ((state[start_word] & start_mask) != start_mask) {
+            return false;
+        }
+        for (s64 i = start_word + 1; i < end_word; ++i) {
+            if (state[i] != ~0ULL) {
+                return false;
+            }
+        }
+        return (state[end_word] & end_mask) == end_mask;
+    }
+
     void Lock(const Bounds& bounds) noexcept {
         mutex.lock();
     }

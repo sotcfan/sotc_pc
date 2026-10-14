@@ -100,6 +100,15 @@ public:
                     !manager->template IsRegionModified<Type::CPU>(offset, size)) {
                     return;
                 }
+                // sotcport: the same for a buffer bound for writing again (dispatch after
+                // dispatch): nothing CPU-modified and every page already GPU-modified (and read
+                // protected) means nothing changes. A readback completing meanwhile cannot clear
+                // these pages: the buffer cache added the exact range first (ObtainBuffer).
+                if (precheck && is_written &&
+                    !manager->template IsRegionModified<Type::CPU>(offset, size) &&
+                    manager->template IsRegionFullyModified<Type::GPU>(offset, size)) {
+                    return;
+                }
                 if (is_written) {
                     manager->template ForEachModifiedRange<Type::CPU, StateOp::Clear, StateOp::Set>(
                         offset, size, func);

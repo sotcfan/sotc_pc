@@ -152,6 +152,10 @@ private:
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
+    void EliminateFastClear(const AmdGpu::ColorBuffer& col_buf, AmdGpu::CbDbExtent hint);
+    /// sotcport: hands a FilterDraw pass to stage B, or skips one that does nothing; false when
+    /// the caller has to drain and run it here.
+    bool PostFilterDraw();
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
