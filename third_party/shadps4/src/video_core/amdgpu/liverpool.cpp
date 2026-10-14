@@ -137,6 +137,9 @@ bool Liverpool::PipelinedOpcode(PM4ItOpcode opcode, const u32* packet) {
     case PM4ItOpcode::EventWriteEop: // signalled by stage B (or drains in OnFence)
     case PM4ItOpcode::WaitRegMem:    // drains in WaitRegMemMet when needed
         return true;
+    case PM4ItOpcode::EventWriteEos: // label writes: signalled by stage B (or drain in OnFence)
+        return reinterpret_cast<const PM4CmdEventWriteEos*>(packet)->command ==
+               PM4CmdEventWriteEos::Command::SignalFence;
     case PM4ItOpcode::DmaData:
         // The ~100k/s DmaData to 0x3022C (a register the handler skips) do nothing.
         return reinterpret_cast<const PM4DmaData*>(packet)->dst_addr_lo == 0x3022C;
@@ -242,6 +245,26 @@ void Liverpool::SignalReleaseMem(const PM4CmdReleaseMem& packet, u32 pipe_id) {
         [this](VAddr dst, u16 gds_index, u16 num_dwords) {
             rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
         });
+}
+
+// sotcport: whether a fence writing [dst, +bytes) can change commands this thread has yet to
+// read in [begin, end), the command buffer being processed; `current` is the packet being
+// processed. The game allocates its labels from its command buffers (inside NOPs, ahead of the
+// packets that use them), so ~9,000 fences a second land there: always behind the current packet
+// in the benchmark scene (measured 2026-10-14). Those cannot change what is left to read and are
+// signalled by stage B in order; a command buffer read again later drains first if a fence still
+// queued writes into it (DrainIfCommandsPending). Only fences ahead are written right away.
+static bool WritesUnreadCommands(VAddr begin, VAddr end, const u32* current, VAddr dst,
+                                 u32 bytes) {
+    const auto current_address = reinterpret_cast<VAddr>(current);
+    if (dst >= end || dst + bytes <= begin) {
+        return false;
+    }
+    // A packet copied out of a ring (it wrapped) is not where the ring is: be conservative.
+    if (current_address < begin || current_address >= end) {
+        return true;
+    }
+    return dst + bytes > current_address;
 }
 
 // sotcport: advances a compute queue's read pointer, which lives in guest memory. Written through
@@ -468,6 +491,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     // sotcport: the command buffer being read (fences that patch it are signalled at once).
     const auto cmd_begin = reinterpret_cast<VAddr>(dcb.data());
     const auto cmd_end = cmd_begin + dcb.size_bytes();
+    // sotcport (two-stage draw pipeline): fences still queued for stage B may write into this
+    // command buffer (labels in it, see WritesUnreadCommands): they land before it is read.
+    if (rasterizer && rasterizer->PendingWriteOverlaps(cmd_begin, dcb.size_bytes())) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommandsPending);
+    }
 
     cblock.Reset();
 
@@ -951,8 +979,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
+                // sotcport: a label write is signalled by stage B in order, like EOP (~800/s in
+                // the benchmark scene used to drain). Not a GDS store: it reads the GPU's GDS.
+                if (rasterizer &&
+                    event_eos->command == PM4CmdEventWriteEos::Command::SignalFence &&
+                    !WritesUnreadCommands(cmd_begin, cmd_end, dcb.data(),
+                                          reinterpret_cast<VAddr>(event_eos->Address()),
+                                          sizeof(u32)) &&
+                    rasterizer->PostEosFence(*event_eos)) {
+                    break;
+                }
                 if (rasterizer) {
-                    rasterizer->OnFence();
+                    rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceEos);
                 }
                 event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
@@ -977,12 +1015,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 static const bool post_in_cmdbuf =
                     std::getenv("SOTC_PIPE_FENCE_IN_CMDBUF") != nullptr; // TEMP experiment
                 const bool patches_commands =
-                    !post_in_cmdbuf && fence_dst >= cmd_begin && fence_dst < cmd_end;
+                    !post_in_cmdbuf &&
+                    WritesUnreadCommands(cmd_begin, cmd_end, dcb.data(), fence_dst, sizeof(u64));
                 if (rasterizer && !patches_commands && rasterizer->PostEopFence(*event_eop)) {
                     break;
                 }
                 if (rasterizer) {
-                    rasterizer->OnFence();
+                    rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceEopInCmdbuf);
                 }
                 SignalEopFence(*event_eop);
                 break;
@@ -1033,7 +1072,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                        data_size); // sotcport (SOTC_MEMORY_TYPES)
                 if (!write_data->wr_one_addr.Value()) {
                     if (rasterizer) {
-                        rasterizer->OnFence();
+                        rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceWriteData);
                     }
                     std::memcpy(address, write_data->data, data_size);
                 } else {
@@ -1182,6 +1221,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
 
     auto base_addr = reinterpret_cast<VAddr>(acb.data());
     size_t acb_size = acb.size_bytes();
+    // sotcport (two-stage draw pipeline): see ProcessGraphics.
+    if (rasterizer && rasterizer->PendingWriteOverlaps(base_addr, acb_size)) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommandsPending);
+    }
     while (!acb.empty()) {
         ProcessCommands();
 
@@ -1403,7 +1446,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                                    data_size); // sotcport (SOTC_MEMORY_TYPES)
             if (!write_data->wr_one_addr.Value()) {
                 if (rasterizer) {
-                    rasterizer->OnFence();
+                    rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceAscWriteData);
                 }
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
             } else {
@@ -1441,14 +1484,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // SOTC_PIPE_FENCE_IN_CMDBUF=1 posts these too (TEMP experiment: the labels written
             // there are what the queues' WAIT_REG_MEMs poll; see OTIMIZACAO notes).
             static const bool post_in_cmdbuf = std::getenv("SOTC_PIPE_FENCE_IN_CMDBUF") != nullptr;
-            const bool patches_commands = !post_in_cmdbuf &&
-                fence_dst >= base_addr && fence_dst < base_addr + acb_size;
+            const bool patches_commands =
+                !post_in_cmdbuf && WritesUnreadCommands(base_addr, base_addr + acb_size, acb.data(),
+                                                        fence_dst, sizeof(u64));
             if (rasterizer && !patches_commands &&
                 rasterizer->PostReleaseMem(*release_mem, queue.pipe_id)) {
                 break;
             }
             if (rasterizer) {
-                rasterizer->OnFence();
+                rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceReleaseInCmdbuf);
             }
             SignalReleaseMem(*release_mem, queue.pipe_id);
             break;

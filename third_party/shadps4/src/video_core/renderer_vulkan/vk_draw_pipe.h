@@ -104,6 +104,13 @@ public:
         ReasonReadback,   ///< readback handled on the GPU side
         ReasonUnmap,
         ReasonOther,
+        // sotcport: fences signalled on stage A (OnFence), by packet.
+        ReasonFenceEos,            ///< graphics EVENT_WRITE_EOS
+        ReasonFenceEopInCmdbuf,    ///< graphics EVENT_WRITE_EOP into the command buffer
+        ReasonFenceWriteData,      ///< graphics WRITE_DATA
+        ReasonFenceAscWriteData,   ///< compute WRITE_DATA
+        ReasonFenceReleaseInCmdbuf, ///< compute RELEASE_MEM into the command buffer
+        ReasonCommandsPending, ///< a command buffer about to be read has fences queued into it
         NumReasons,
     };
     static constexpr const char* ReasonName(u32 reason) {
@@ -111,6 +118,8 @@ public:
             "commands", "gpu idle", "const ram", "srt pending", "srt gpu", "filter",
             "flush",    "finish",   "submit",    "fence",       "fill",    "copy",
             "gds",      "invalidate", "readback", "unmap",      "other",
+            "fence: eos", "fence: eop in cmdbuf", "fence: write data", "fence: compute write data",
+            "fence: release in cmdbuf", "cmdbuf pending",
         };
         return reason >= ReasonCommands && reason < NumReasons ? names[reason - ReasonCommands]
                                                                : nullptr;

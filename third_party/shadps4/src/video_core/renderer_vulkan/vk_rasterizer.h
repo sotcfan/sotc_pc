@@ -16,6 +16,7 @@ namespace AmdGpu {
 struct Liverpool;
 union Regs;
 struct PM4CmdEventWriteEop;
+struct PM4CmdEventWriteEos;
 struct PM4CmdWaitRegMem;
 struct PM4CmdReleaseMem;
 enum class DataSelect : u32;
@@ -85,6 +86,8 @@ public:
     /// sotcport (two-stage draw pipeline): hands an end-of-pipe fence to stage B, which signals
     /// it in stream order. False with the pipeline off: the caller signals it as before.
     bool PostEopFence(const AmdGpu::PM4CmdEventWriteEop& packet);
+    /// sotcport: the same for an EVENT_WRITE_EOS label write.
+    bool PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet);
     /// sotcport (two-stage draw pipeline): hands a GPU command processor command (see
     /// Liverpool::SendCommand) to stage B, which runs it in order with the packets. Takes the
     /// callback (it is moved from) and returns true; false with the pipeline off or the option off.
@@ -122,7 +125,8 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
-    void OnFence();
+    /// `reason`: a DrawPipe::Reason for the drain (DrawPipe::ReasonFence when not given).
+    void OnFence(u32 reason = 0);
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;

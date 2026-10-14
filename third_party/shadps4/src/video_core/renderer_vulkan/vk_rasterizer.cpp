@@ -1179,6 +1179,28 @@ bool Rasterizer::PostEopFence(const AmdGpu::PM4CmdEventWriteEop& packet) {
     return true;
 }
 
+bool Rasterizer::PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet) {
+    if (!PostFencesOnStageB()) {
+        return false;
+    }
+    NotePendingFence(reinterpret_cast<VAddr>(packet.Address()), AmdGpu::DataSelect::Data32Low,
+                     packet.DataDWord(), sizeof(u32));
+    PostTask(
+        [](Rasterizer& self, const u8* payload) {
+            const auto& eos = *reinterpret_cast<const AmdGpu::PM4CmdEventWriteEos*>(payload);
+            self.texture_cache.ProcessDownloadImages(); // what OnFence does on stage A
+            eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
+                auto* memory = Core::Memory::Instance();
+                ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+            });
+        },
+        &packet, sizeof(packet));
+    if (!pending_fences.empty() && pending_fences.back().position == 0) {
+        pending_fences.back().position = draw_pipe->Head();
+    }
+    return true;
+}
+
 bool Rasterizer::PostReleaseMem(const AmdGpu::PM4CmdReleaseMem& packet, u32 pipe_id) {
     if (!PostFencesOnStageB()) {
         return false;
@@ -1359,8 +1381,8 @@ void Rasterizer::OnSubmit() {
     runtime.TickFrame();
 }
 
-void Rasterizer::OnFence() {
-    DrainDrawPipe(DrawPipe::ReasonFence); // sotcport: two-stage draw pipeline
+void Rasterizer::OnFence(u32 reason) {
+    DrainDrawPipe(reason ? reason : DrawPipe::ReasonFence); // sotcport: two-stage draw pipeline
     texture_cache.ProcessDownloadImages();
 }
 
