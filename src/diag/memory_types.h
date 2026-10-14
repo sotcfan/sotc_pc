@@ -27,8 +27,18 @@ enum class MemAccess : u32 {
 
 bool MemoryTypesEnabled();
 
-// Counts an access of `bytes` at `address`. Cheap when SOTC_MEMORY_TYPES is not set.
-void NoteMemoryAccess(MemAccess kind, u64 address, u64 bytes);
+// Set from SOTC_MEMORY_TYPES before anything runs; read inline so that the calls in hot paths
+// (every SRT walker read, every buffer bound) cost a load and a branch when it is off.
+extern const bool g_memory_types_enabled;
+
+void NoteMemoryAccessSlow(MemAccess kind, u64 address, u64 bytes);
+
+// Counts an access of `bytes` at `address`.
+inline void NoteMemoryAccess(MemAccess kind, u64 address, u64 bytes) {
+    if (g_memory_types_enabled) [[unlikely]] {
+        NoteMemoryAccessSlow(kind, address, bytes);
+    }
+}
 
 // A game mapping of physical memory: counted by size and alignment (address and physical).
 void NoteGameMapping(u64 address, u64 size, u64 physical, bool flexible);

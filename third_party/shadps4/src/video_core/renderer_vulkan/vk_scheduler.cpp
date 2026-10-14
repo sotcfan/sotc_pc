@@ -31,6 +31,10 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
         record_chunk = AcquireChunk();
         recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
         recording_threaded = true;
+        // SOTC_ASYNC_SUBMIT=1 (experiment, not validated yet): the recording thread ends,
+        // submits and begins the command buffers itself (SubmitAsync). Without it, the thread
+        // asking for a submission waits for the recording thread and submits.
+        async_submit = std::getenv("SOTC_ASYNC_SUBMIT") != nullptr;
     }
     BeginSession();
     priority_pending_ops_thread =
@@ -362,8 +366,13 @@ void Scheduler::EndSession() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    if (async_submit) {
+        SubmitAsync(info);
+        return;
+    }
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
+
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -431,6 +440,100 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     // Apply pending operations
     PopPendingOperations();
+}
+
+void Scheduler::SubmitAsync(SubmitInfo& info) {
+    // sotcport: with threaded recording, ending the command buffer used to wait for the
+    // recording thread to catch up (SyncRecording) on the thread asking for the submission:
+    // ~2,000 cycles per dispatch on average on the draw recording thread, which flushes
+    // every 256 draws and dispatches and for every readback. Now the submission is one more
+    // recorded command: the recording thread ends the buffer, submits it (in order, under
+    // submit_mutex) and begins the next one; the caller goes on recording at once. The tick
+    // is decided here, so waiting for it (a host wait on the timeline) works as before.
+    u64 signal_value;
+    {
+        // Only the tick and the sparse binds (queued now, ahead of the buffers that use
+        // them) under the queue lock: the recording thread takes it to submit, so holding it
+        // while anything here waits for that thread (pending operations may) would deadlock.
+        std::scoped_lock lk{submit_mutex};
+        signal_value = work_semaphore.NextTick();
+        if (on_submit) {
+            on_submit(info);
+        }
+    }
+    if (on_session) {
+        on_session();
+    }
+    AsyncSubmit submit{};
+    for (auto& session : sessions) {
+        if (session.upload) {
+            Check(session.upload.end());
+            ASSERT(submit.num_uploads < submit.uploads.size());
+            submit.uploads[submit.num_uploads++] = session.upload;
+        }
+    }
+    sessions.clear();
+    sessions.emplace_back(); // the next session (its primary lives on the recording thread)
+    EndRendering();
+    info.AddSignal(work_semaphore.Handle(), signal_value);
+    submit.info = info;
+    Record([this, submit](vk::CommandBuffer cmdbuf) { RecorderSubmit(cmdbuf, submit); });
+    KickRecording(true); // the submission ends its block: the next one uses the new buffer
+    direct_mode = false;
+    dynamic_state.Invalidate();
+    work_semaphore.Refresh();
+    PopPendingOperations();
+}
+
+void Scheduler::RecorderSubmit(vk::CommandBuffer cmdbuf, const AsyncSubmit& submit) {
+    // Recording thread (see SubmitExecution): every command recorded before the submission is
+    // in `cmdbuf` now. The primary pool is only used on this thread from here on.
+    GpuTimingEnd(cmdbuf);
+    Check(cmdbuf.end());
+    std::array<vk::CommandBuffer, 5> cmd_buffers;
+    u32 count = 0;
+    for (u32 i = 0; i < submit.num_uploads; ++i) {
+        cmd_buffers[count++] = submit.uploads[i];
+    }
+    cmd_buffers[count++] = cmdbuf;
+    const auto& info = submit.info;
+    std::array<vk::PipelineStageFlags, std::tuple_size_v<decltype(info.wait_semas)>>
+        wait_stage_masks;
+    wait_stage_masks.fill(vk::PipelineStageFlagBits::eAllCommands);
+    const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .waitSemaphoreValueCount = info.num_wait_semas,
+        .pWaitSemaphoreValues = info.wait_ticks.data(),
+        .signalSemaphoreValueCount = info.num_signal_semas,
+        .pSignalSemaphoreValues = info.signal_ticks.data(),
+    };
+    const vk::SubmitInfo submit_info = {
+        .pNext = &timeline_si,
+        .waitSemaphoreCount = info.num_wait_semas,
+        .pWaitSemaphores = info.wait_semas.data(),
+        .pWaitDstStageMask = wait_stage_masks.data(),
+        .commandBufferCount = count,
+        .pCommandBuffers = cmd_buffers.data(),
+        .signalSemaphoreCount = info.num_signal_semas,
+        .pSignalSemaphores = info.signal_semas.data(),
+    };
+    {
+        std::scoped_lock lk{submit_mutex};
+        const auto result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+        for (auto& pending : timing_unsubmitted) {
+            pending.tick = info.signal_ticks[info.num_signal_semas - 1];
+            timing_pending.push_back(pending);
+        }
+        timing_unsubmitted.clear();
+        GpuTimingCollect();
+    }
+    const vk::CommandBufferBeginInfo begin_info = {
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    };
+    const vk::CommandBuffer next = primary_pool.Commit();
+    Check(next.begin(begin_info));
+    GpuTimingBegin(next);
+    recording_cmdbuf = next;
 }
 
 void Scheduler::GpuTimingBegin(vk::CommandBuffer cmdbuf) {

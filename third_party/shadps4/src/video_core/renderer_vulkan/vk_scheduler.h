@@ -521,7 +521,7 @@ public:
             direct_recordings.fetch_add(1, std::memory_order_relaxed);
             TraceDirectRecording(__builtin_return_address(0));
         }
-        return sessions.back().primary;
+        return recording_threaded ? recording_cmdbuf : sessions.back().primary;
     }
 
     /// sotcport: SOTC_RECORDER_TRACE=1 logs the most frequent callers of CommandBuffer()
@@ -535,7 +535,7 @@ public:
     void Record(Func&& func) {
         CheckOwner(); // TEMP (two-stage draw pipeline)
         if (!recording_threaded || direct_mode) {
-            func(sessions.back().primary);
+            func(recording_threaded ? recording_cmdbuf : sessions.back().primary);
             return;
         }
         if (!record_chunk->Push(std::forward<Func>(func))) {
@@ -669,6 +669,17 @@ private:
 
     /// sotcport (diagnostics, SOTC_GPU_TIMING=1): GPU time of every submitted command buffer, from
     /// timestamps written at its start and end (see BeginSession/EndSession).
+    /// sotcport: asynchronous submission (threaded recording): the recording thread ends the
+    /// command buffer, submits it and begins the next one when it reaches the point where the
+    /// submission was asked (see SubmitExecution).
+    struct AsyncSubmit {
+        SubmitInfo info;
+        std::array<vk::CommandBuffer, 4> uploads;
+        u32 num_uploads;
+    };
+    void RecorderSubmit(vk::CommandBuffer cmdbuf, const AsyncSubmit& submit);
+    void SubmitAsync(SubmitInfo& info);
+    bool async_submit = false;
     void GpuTimingBegin(vk::CommandBuffer cmdbuf);
     void GpuTimingEnd(vk::CommandBuffer cmdbuf);
     void GpuTimingCollect();

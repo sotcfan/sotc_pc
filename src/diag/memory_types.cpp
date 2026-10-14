@@ -13,11 +13,13 @@
 #include "hle/kernel/gpu_memory.h"
 
 namespace diag {
+
+const bool g_memory_types_enabled = std::getenv("SOTC_MEMORY_TYPES") != nullptr;
+
 namespace {
 
 bool Enabled() {
-    static const bool enabled = std::getenv("SOTC_MEMORY_TYPES") != nullptr;
-    return enabled;
+    return g_memory_types_enabled;
 }
 
 // Columns of the report: the memory types the game uses, then everything else.
@@ -133,7 +135,7 @@ bool MemoryTypesEnabled() {
     return Enabled();
 }
 
-void NoteMemoryAccess(MemAccess kind, u64 address, u64 bytes) {
+void NoteMemoryAccessSlow(MemAccess kind, u64 address, u64 bytes) {
     if (!Enabled() || kind >= MemAccess::Count) {
         return;
     }
