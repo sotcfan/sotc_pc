@@ -34,6 +34,20 @@ std::filesystem::path DataDir() {
     return "sotcport-data";
 }
 
+bool AcquireInstanceLock(const std::filesystem::path& data_dir) {
+    std::error_code error;
+    std::filesystem::create_directories(data_dir, error);
+    const auto path = data_dir / "sotcport.lock";
+    // No sharing: a second process cannot open the file while this one runs. Never closed
+    // (released when the process exits, also after a crash).
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                                    OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        return true;
+    }
+    return GetLastError() != ERROR_SHARING_VIOLATION; // other errors: do not refuse to run
+}
+
 } // namespace platform
 
 #endif // _WIN32

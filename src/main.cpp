@@ -139,6 +139,12 @@ int main(int argc, char** argv) {
 
     try {
         crash::Install();
+        if (!platform::AcquireInstanceLock(data_dir)) {
+            std::fprintf(stderr,
+                         "error: sotcport is already running (data folder %s); close it first\n",
+                         data_dir.string().c_str());
+            return 1;
+        }
         hle::kernel::InitializeFilesystem(std::filesystem::absolute(game_dir), data_dir);
         hle::savedata::Initialize(data_dir);
 
