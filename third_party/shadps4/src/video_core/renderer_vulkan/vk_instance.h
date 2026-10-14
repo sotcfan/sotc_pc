@@ -321,6 +321,11 @@ public:
         return properties.limits.minUniformBufferOffsetAlignment;
     }
 
+    /// sotcport (SOTC_GPU_TIMING): nanoseconds per GPU timestamp tick.
+    float TimestampPeriod() const {
+        return properties.limits.timestampPeriod;
+    }
+
     /// Returns the minimum required alignment for storage buffers
     vk::DeviceSize StorageMinAlignment() const {
         return properties.limits.minStorageBufferOffsetAlignment;

@@ -471,6 +471,11 @@ public:
     void BeginRendering(const RenderState& new_state);
 
     /// Ends current rendering scope.
+    /// sotcport: whether a render pass is open.
+    [[nodiscard]] bool IsRendering() const noexcept {
+        return is_rendering;
+    }
+
     void EndRendering();
 
     /// Starts a new session.
@@ -661,6 +666,25 @@ private:
         vk::CommandBuffer primary{};
     };
     std::vector<Session> sessions;
+
+    /// sotcport (diagnostics, SOTC_GPU_TIMING=1): GPU time of every submitted command buffer, from
+    /// timestamps written at its start and end (see BeginSession/EndSession).
+    void GpuTimingBegin(vk::CommandBuffer cmdbuf);
+    void GpuTimingEnd(vk::CommandBuffer cmdbuf);
+    void GpuTimingCollect();
+    vk::UniqueQueryPool timing_pool;
+    static constexpr u32 TimingSlots = 1024; ///< pairs of queries
+    u32 timing_next = 0;
+    struct TimingPending {
+        u32 slot;
+        u64 tick;
+    };
+    std::deque<TimingPending> timing_pending;
+    std::vector<TimingPending> timing_unsubmitted;
+    u64 timing_last_end = 0;
+    double timing_busy_ns = 0, timing_gap_ns = 0, timing_max_ns = 0;
+    u64 timing_count = 0;
+    std::chrono::steady_clock::time_point timing_report{};
     std::condition_variable_any event_cv;
     struct PendingOp {
         Common::UniqueFunction<void> callback;

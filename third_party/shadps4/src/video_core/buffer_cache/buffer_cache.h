@@ -244,6 +244,7 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    u64 dma_synced_marks = 0; ///< sotcport: MemoryTracker::CpuMarks at the last DMA sync
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;

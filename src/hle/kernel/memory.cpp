@@ -138,7 +138,9 @@ struct RunCache {
     struct Run {
         u64 start = 0, end = 0;
     };
-    std::array<Run, 8> runs{};
+    // sotcport: 64 (was 8): the GPU layer looks up every buffer it binds, a few dozen runs a
+    // frame, and with 8 they kept evicting each other (~6% of the draw recording thread).
+    std::array<Run, 64> runs{};
     u32 next = 0;
 };
 thread_local RunCache t_runs;

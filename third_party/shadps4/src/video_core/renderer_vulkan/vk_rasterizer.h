@@ -349,7 +349,10 @@ private:
     bool memo_recording = false; ///< BindResources is recording a BindMemo
     u32 memo_stage = 0;          ///< the stage BindBuffers is binding (for BindMemo::Dynamic)
     size_t memo_first_bound_buffer = 0; ///< bound_buffers size when BindResources started
-    bool BuildBindKey(const Pipeline* pipeline);
+    template <typename Visit>
+    bool VisitBindKey(const Pipeline* pipeline, Visit&& visit);
+    bool BindKeyMatches(const Pipeline* pipeline, bool& eligible);
+    void BuildBindKey(const Pipeline* pipeline);
     void ReuseBindings(const Pipeline* pipeline);
 
     u32 set_write_index{};

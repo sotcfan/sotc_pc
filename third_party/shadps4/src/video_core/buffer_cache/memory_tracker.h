@@ -6,6 +6,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <vector>
 
@@ -55,6 +56,16 @@ public:
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->template ChangeRegionState<StateOp::Set, StateOp::None>(offset, size);
         });
+        cpu_marks.fetch_add(1, std::memory_order_release);
+    }
+
+    /// sotcport: changes whenever memory may have become CPU-modified (see
+    /// BufferCache::SynchronizeDmaBuffers).
+    [[nodiscard]] u64 CpuMarks() const noexcept {
+        return cpu_marks.load(std::memory_order_acquire);
+    }
+    void NoteCpuMarks() noexcept {
+        cpu_marks.fetch_add(1, std::memory_order_release);
     }
 
     /// sotcport: see RegionManager::ExtendWriteFault.
@@ -62,6 +73,7 @@ public:
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->ExtendWriteFault(offset, size);
         });
+        cpu_marks.fetch_add(1, std::memory_order_release);
     }
 
     /// Removes all protection from a page and ensures GPU data has been flushed if requested
@@ -81,6 +93,7 @@ public:
             should_flush |= modified;
             manager->Unlock(bounds);
         });
+        cpu_marks.fetch_add(1, std::memory_order_release);
         if (should_flush) {
             on_flush();
         }
@@ -179,6 +192,7 @@ private:
         new_manager->SetCpuAddress(base_cpu_addr);
         free_managers.pop_back();
         top_tier[page_index] = new_manager;
+        cpu_marks.fetch_add(1, std::memory_order_release); // starts with every page CPU-modified
         return new_manager;
     }
 
@@ -187,6 +201,7 @@ private:
     std::deque<std::array<RegionManager, MANAGER_POOL_SIZE>> manager_pool;
     std::vector<RegionManager*> free_managers;
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
+    std::atomic<u64> cpu_marks{1}; ///< sotcport: see CpuMarks
 };
 
 } // namespace VideoCore

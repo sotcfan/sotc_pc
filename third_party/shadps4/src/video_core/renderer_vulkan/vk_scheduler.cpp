@@ -323,6 +323,7 @@ void Scheduler::BeginSession() {
     };
     session.primary = primary_pool.Commit();
     Check(session.primary.begin(begin_info));
+    GpuTimingBegin(session.primary); // sotcport (SOTC_GPU_TIMING)
     // sotcport: the recording thread is idle here (EndSession synced it).
     recording_cmdbuf = session.primary;
     direct_mode = false;
@@ -356,6 +357,7 @@ void Scheduler::EndSession() {
 
     EndRendering();
     SyncRecording(); // sotcport: every recorded command is in the buffer before it ends
+    GpuTimingEnd(session.primary); // sotcport (SOTC_GPU_TIMING)
     Check(session.primary.end());
 }
 
@@ -418,10 +420,80 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();
+    // sotcport (SOTC_GPU_TIMING): the command buffers just submitted finish at signal_value.
+    for (auto& pending : timing_unsubmitted) {
+        pending.tick = signal_value;
+        timing_pending.push_back(pending);
+    }
+    timing_unsubmitted.clear();
+    GpuTimingCollect();
     BeginSession();
 
     // Apply pending operations
     PopPendingOperations();
+}
+
+void Scheduler::GpuTimingBegin(vk::CommandBuffer cmdbuf) {
+    static const bool enabled = std::getenv("SOTC_GPU_TIMING") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    if (!timing_pool) {
+        timing_pool = Check<"create query pool">(instance.GetDevice().createQueryPoolUnique({
+            .queryType = vk::QueryType::eTimestamp,
+            .queryCount = TimingSlots * 2,
+        }));
+    }
+    const u32 slot = timing_next++ % TimingSlots;
+    cmdbuf.resetQueryPool(*timing_pool, slot * 2, 2);
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *timing_pool, slot * 2);
+    timing_unsubmitted.push_back({slot, 0});
+}
+
+void Scheduler::GpuTimingEnd(vk::CommandBuffer cmdbuf) {
+    if (!timing_pool || timing_unsubmitted.empty()) {
+        return;
+    }
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *timing_pool,
+                          timing_unsubmitted.back().slot * 2 + 1);
+}
+
+void Scheduler::GpuTimingCollect() {
+    if (!timing_pool) {
+        return;
+    }
+    const double period = instance.TimestampPeriod();
+    while (!timing_pending.empty() && work_semaphore.IsFree(timing_pending.front().tick)) {
+        const u32 slot = timing_pending.front().slot;
+        timing_pending.pop_front();
+        std::array<u64, 2> stamps{};
+        if (instance.GetDevice().getQueryPoolResults(*timing_pool, slot * 2, 2, sizeof(stamps),
+                                                     stamps.data(), sizeof(u64),
+                                                     vk::QueryResultFlagBits::e64) !=
+            vk::Result::eSuccess) {
+            continue;
+        }
+        const double busy = (stamps[1] - stamps[0]) * period;
+        timing_busy_ns += busy;
+        timing_max_ns = std::max(timing_max_ns, busy);
+        if (timing_last_end && stamps[0] > timing_last_end) {
+            timing_gap_ns += (stamps[0] - timing_last_end) * period;
+        }
+        timing_last_end = stamps[1];
+        ++timing_count;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - timing_report >= std::chrono::seconds{5}) {
+        const double seconds =
+            timing_report.time_since_epoch().count() ? std::chrono::duration<double>(now - timing_report).count() : 5.0;
+        LOG_INFO(Render, "GPU timing: busy {:.1f} ms/s, idle between command buffers {:.1f} ms/s, "
+                 "{:.0f} command buffers/s, longest {:.2f} ms",
+                 timing_busy_ns / 1e6 / seconds, timing_gap_ns / 1e6 / seconds,
+                 timing_count / seconds, timing_max_ns / 1e6);
+        timing_busy_ns = timing_gap_ns = timing_max_ns = 0;
+        timing_count = 0;
+        timing_report = now;
+    }
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

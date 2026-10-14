@@ -536,6 +536,15 @@ bool BufferCache::PeekGpuMemory(VAddr device_addr, u64 size, u8* out) {
 
 void BufferCache::SynchronizeDmaBuffers() {
     fault_process_pending = true;
+    // sotcport: nothing to do when no memory became CPU-modified since the last time (draws
+    // with DMA access come in runs; the scan below walks all resident memory, ~9% of the draw
+    // recording thread). Memory made resident counts too (EnsureResident). The mark is read
+    // before scanning: a write landing during the scan changes it and the next call scans.
+    const u64 marks = memory_tracker->CpuMarks();
+    if (marks == dma_synced_marks) {
+        return;
+    }
+    dma_synced_marks = marks;
     for (const auto& range : resident_ranges) {
         const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
         const VAddr device_addr = range.start << block_shift;
@@ -635,6 +644,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
         resident_ranges.Add(backing);
+        memory_tracker->NoteCpuMarks(); // sotcport: see SynchronizeDmaBuffers
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 

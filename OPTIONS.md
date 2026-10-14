@@ -71,6 +71,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_NO_SRT_PATCHES=1` | on | Constants a shader reads that the GPU itself computed are copied on the GPU, right before the draw, instead of being read back on the CPU. This turns it off. |
 | `SOTC_NO_BIND_MEMO=1` | on | Most draws bind exactly the buffers, textures and samplers of the draw before them: their bindings are reused and only the per-draw constants are redone. This turns it off. |
 | `SOTC_NO_TARGET_CACHE=1` | on | Render targets are looked up again only when their registers change. This turns it off. |
+| `SOTC_NO_TEXTURE_CACHE_LOOKUP=1` | on | Textures are looked up in the texture cache again only when the cache's set of images changes. This turns it off. |
 
 ## Diagnostics
 
@@ -87,6 +88,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_PACKET_STATS=1` | Statistics of the GPU command packets the game sends. |
 | `SOTC_SRT_FETCH_PAGES=1` | The shader resource walker downloads whole pages the GPU wrote, instead of exact bytes (rules out reads the byte check would miss). |
 | `SOTC_TRACE_FLATBUF=<hash>` | Logs the flattened user data and the samplers the GPU layer gives that shader (hex hash, e.g. `bd2fa723`) at every draw or dispatch. |
+| `SOTC_GPU_TIMING=1` | Every 5 s, how long the GPU was busy running sotcport's command buffers (timestamps at their start and end), how long it waited between them, how many there were and the longest. |
 | `SOTC_FRAME_TIMELINE=<n>` | Every n-th frame, logs a timeline in milliseconds since the previous one: game submissions (`S`, with their size), flips (`F`), presentation (`P`), the command processor waking (`a`) and running out of work (`i`, `d`), stage B running out of packets and getting some (`e`, `b`), stage A waiting for stage B (`w` with the reason, `W`), guest readbacks (`R`, `r`). |
 | `SOTC_READBACK_ON_A=1` | Guest readbacks go through the command processor after draining the draw pipeline, as before (A/B measurements; by default stage B records the copy at once). |
 | `SOTC_MEMORY_TYPES=1` | Every 10 s, how much the GPU layer reads and binds of each kind of game memory (Onion, Garlic, flexible) and how the game maps memory (sizes, alignments). |

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "perf_temp.h" // sotcport TEMP
 #include <atomic>
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -742,7 +743,9 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
     if (src_access & WRITE_MASK) {
         resource->write_ranges.Add(range);
     }
-    if (src_access & READ_MASK) {
+    // sotcport: draws read the same buffers draw after draw; skip the insert (and the merge it
+    // does) when the range is there already (~8% of the draw recording thread).
+    if (src_access & READ_MASK && !resource->read_ranges.Contains(range.start, range.end)) {
         resource->read_ranges.Add(range);
     }
 

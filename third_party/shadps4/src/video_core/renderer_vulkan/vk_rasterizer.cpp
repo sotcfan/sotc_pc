@@ -144,35 +144,49 @@ bool CheckSrtReads(Shader::Info& info, const u64* begin, const u64* end) {
 // processor thread only.
 using ImageDesc = VideoCore::TextureCache::ImageDesc;
 
-const ImageDesc& CachedImageDesc(const AmdGpu::Image& sharp, const Shader::ImageResource& resource) {
-    struct Entry {
-        AmdGpu::Image sharp;
-        u8 flags;
-        bool valid;
-        ImageDesc desc;
-    };
+// sotcport: also keeps the image FindImage found for the description (see FindTexture below):
+// valid while the texture cache's registry stays the same (TextureCache::RegistryGeneration).
+struct ImageDescEntry {
+    AmdGpu::Image sharp;
+    u8 flags;
+    bool valid;
+    ImageDesc desc;
+    u64 found_generation = ~u64{0};
+    VideoCore::ImageId found_image{};
+    ImageDesc found_desc; ///< desc as FindImage left it (overlaps adjust the view)
+};
+
+ImageDescEntry* CachedImageEntry(const AmdGpu::Image& sharp, const Shader::ImageResource& resource) {
     // A 2-way set-associative table of 4096 with a cheaper multiplicative hash (bbport step 4)
     // was measured slower (3.64 -> 3.71 us per draw, 3 alternating runs each, 2026-10-11): the
     // T# hash is cheap and the bigger table costs more in cache misses.
-    static std::array<Entry, 1024> cache{};
+    static std::array<ImageDescEntry, 1024> cache{};
     // SOTC_NO_IMAGE_DESC_CACHE=1 builds every description again (diagnostics).
     static const bool disabled = std::getenv("SOTC_NO_IMAGE_DESC_CACHE") != nullptr;
     if (disabled) {
-        alignas(ImageDesc) static thread_local std::byte scratch[sizeof(ImageDesc)];
-        return *std::construct_at(reinterpret_cast<ImageDesc*>(scratch), sharp, resource);
+        return nullptr;
     }
     const u8 flags = u8(resource.is_depth) | u8(resource.is_written) << 1 |
                      u8(resource.is_array) << 2;
     const u64 hash = XXH3_64bits(&sharp, sizeof(sharp)) + flags;
-    Entry& entry = cache[hash % cache.size()];
+    ImageDescEntry& entry = cache[hash % cache.size()];
     if (!entry.valid || entry.flags != flags ||
         std::memcmp(&entry.sharp, &sharp, sizeof(sharp)) != 0) {
         entry.sharp = sharp;
         entry.flags = flags;
         entry.valid = true;
+        entry.found_generation = ~u64{0};
         std::construct_at(&entry.desc, sharp, resource);
     }
-    return entry.desc;
+    return &entry;
+}
+
+const ImageDesc& CachedImageDesc(const AmdGpu::Image& sharp, const Shader::ImageResource& resource) {
+    if (auto* entry = CachedImageEntry(sharp, resource)) {
+        return entry->desc;
+    }
+    alignas(ImageDesc) static thread_local std::byte scratch[sizeof(ImageDesc)];
+    return *std::construct_at(reinterpret_cast<ImageDesc*>(scratch), sharp, resource);
 }
 
 } // Anonymous namespace
@@ -1506,10 +1520,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // descriptors of the previous draw are reused and only the per-draw parts are redone
     // (ReuseBindings), as long as nothing ran in between (BindMemo::packet) and the texture
     // cache's registry is the same. SOTC_NO_BIND_MEMO=1 binds everything every time.
-    const bool memo_eligible = BuildBindKey(pipeline);
-    if (memo_eligible && bind_memo.packet + 1 == bind_packet && bind_memo.pipeline == pipeline &&
-        bind_memo.texture_generation == texture_cache.RegistryGeneration() &&
-        bind_memo.key == bind_key) {
+    bool memo_eligible = false;
+    const bool memo_valid = bind_memo.packet + 1 == bind_packet &&
+                            bind_memo.texture_generation == texture_cache.RegistryGeneration();
+    if (BindKeyMatches(pipeline, memo_eligible) && memo_valid) {
         ReuseBindings(pipeline);
         bind_memo.packet = bind_packet;
         return true;
@@ -1562,6 +1576,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             bind_memo.packet = bind_packet;
             bind_memo.pipeline = pipeline;
             bind_memo.texture_generation = texture_cache.RegistryGeneration();
+            BuildBindKey(pipeline);
             std::swap(bind_memo.key, bind_key);
             bind_memo.bound_buffers.assign(bound_buffers.begin() + first_bound_buffer,
                                            bound_buffers.end());
@@ -1573,22 +1588,24 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     return true;
 }
 
-bool Rasterizer::BuildBindKey(const Pipeline* pipeline) {
+template <typename Visit>
+bool Rasterizer::VisitBindKey(const Pipeline* pipeline, Visit&& visit) {
     // What the bindings of a draw depend on besides the texture cache's registry: the pipeline,
-    // the targets found for it, the border color base, and every descriptor (V#, T#, S#). Only
-    // draws whose bindings are all read-only and need nothing done per draw but the flattened
-    // user data and streamed buffers (no GDS, user clip planes, DMA, storage, SRT patches).
-    // Measured in the benchmark scene: ~63% of the eligible draws reuse their bindings.
+    // the targets found for it, the border color base, and every descriptor (V#, T#, S#), in a
+    // fixed order: `visit(words, count)` gets them piece by piece and returns false to stop.
+    // False when the draw cannot reuse bindings: only draws whose bindings are all read-only and
+    // need nothing done per draw but the flattened user data and streamed buffers (no GDS, user
+    // clip planes, DMA, storage, SRT patches). ~63% of the eligible draws reuse their bindings.
     static const bool disabled = std::getenv("SOTC_NO_BIND_MEMO") != nullptr;
     if (disabled || pipeline->IsCompute() || !DrawPipe::OnStageB()) {
         return false;
     }
-    auto& key = bind_key;
-    key.clear();
-    const auto add = [&key](const auto& value) {
+    bool go_on = true;
+    const auto add = [&](const auto& value) {
         static_assert(sizeof(value) % sizeof(u32) == 0);
-        const auto* words = reinterpret_cast<const u32*>(&value);
-        key.insert(key.end(), words, words + sizeof(value) / sizeof(u32));
+        if (go_on) {
+            go_on = visit(reinterpret_cast<const u32*>(&value), sizeof(value) / sizeof(u32));
+        }
     };
     for (const auto& cb : cb_descs) {
         add(cb.image_id);
@@ -1622,19 +1639,49 @@ bool Rasterizer::BuildBindKey(const Pipeline* pipeline) {
                 }
                 continue;
             }
-            add(desc.GetSharp(*stage));
+            if (go_on) {
+                add(desc.GetSharp(*stage));
+            }
         }
         for (const auto& desc : stage->images) {
             if (desc.is_written) {
                 return false;
             }
-            add(desc.GetSharp(*stage));
+            if (go_on) {
+                add(desc.GetSharp(*stage));
+            }
         }
         for (const auto& desc : stage->samplers) {
-            add(desc.GetSharp(*stage));
+            if (go_on) {
+                add(desc.GetSharp(*stage));
+            }
         }
     }
     return true;
+}
+
+bool Rasterizer::BindKeyMatches(const Pipeline* pipeline, bool& eligible) {
+    // Compared in place with the kept key: no key is built for a draw that reuses.
+    size_t at = 0;
+    bool match = bind_memo.pipeline == pipeline;
+    eligible = VisitBindKey(pipeline, [&](const u32* words, size_t count) {
+        if (!match || at + count > bind_memo.key.size() ||
+            !std::equal(words, words + count, bind_memo.key.begin() + at)) {
+            match = false;
+            return false;
+        }
+        at += count;
+        return true;
+    });
+    return eligible && match && at == bind_memo.key.size();
+}
+
+void Rasterizer::BuildBindKey(const Pipeline* pipeline) {
+    bind_key.clear();
+    VisitBindKey(pipeline, [&](const u32* words, size_t count) {
+        bind_key.insert(bind_key.end(), words, words + count);
+        return true;
+    });
 }
 
 void Rasterizer::ReuseBindings(const Pipeline* pipeline) {
@@ -2175,18 +2222,37 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
         for (auto i = 0; i < num_bindings; i++) {
             auto& [image_id, desc] = image_bindings[num_images++];
-            desc = CachedImageDesc(tsharp, image_desc);
+            // sotcport: the image found for this T# last time, while the texture cache's
+            // registry is the same (FindImage was ~4% of the draw recording thread).
+            // SOTC_NO_TEXTURE_CACHE_LOOKUP=1 finds every texture again (A/B).
+            static const bool no_lookup = std::getenv("SOTC_NO_TEXTURE_CACHE_LOOKUP") != nullptr;
+            ImageDescEntry* entry = mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
+                                            !no_lookup
+                                        ? CachedImageEntry(tsharp, image_desc)
+                                        : nullptr;
+            if (entry && entry->found_generation == texture_cache.RegistryGeneration()) {
+                desc = entry->found_desc;
+                image_id = entry->found_image;
+                texture_cache.UseFoundImage(image_id);
+            } else {
+                desc = CachedImageDesc(tsharp, image_desc);
 
-            if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
-                ASSERT(num_bindings == 1);
-                desc.view_info.range.base.level += image_desc.constant_mip_index;
-                desc.view_info.range.extent.levels = 1;
-            } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
-                desc.view_info.range.base.level += i;
-                desc.view_info.range.extent.levels = 1;
+                if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
+                    ASSERT(num_bindings == 1);
+                    desc.view_info.range.base.level += image_desc.constant_mip_index;
+                    desc.view_info.range.extent.levels = 1;
+                } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
+                    desc.view_info.range.base.level += i;
+                    desc.view_info.range.extent.levels = 1;
+                }
+
+                image_id = texture_cache.FindImage(desc);
+                if (entry && texture_cache.LastFindWasDirect()) {
+                    entry->found_generation = texture_cache.RegistryGeneration();
+                    entry->found_image = image_id;
+                    entry->found_desc = desc;
+                }
             }
-
-            image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             diag::NoteMemoryAccess(diag::MemAccess::ImageBind, image->info.guest_address,
                                    image->info.guest_size); // sotcport (SOTC_MEMORY_TYPES)
