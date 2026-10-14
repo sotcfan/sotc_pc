@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
@@ -45,6 +46,10 @@ enum SchedulerType {
 };
 
 class Rasterizer;
+
+/// sotcport: waits up to `timeout` for the screenshots asked for to be saved (before exiting,
+/// so the last ones are not lost). False if some are still pending.
+bool WaitForScreenshots(std::chrono::milliseconds timeout);
 
 class Presenter {
 public:

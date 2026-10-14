@@ -46,6 +46,7 @@
 #include "video_core/amdgpu/pm4_opcodes.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 
@@ -835,6 +836,14 @@ Initialize(int sdk_version) {
     return true;
 }
 
+
+void FinishScreenshots() {
+    // A screenshot is saved once the GPU has run the frame's copy (a deferred operation of the
+    // draw scheduler), then encoded (~0.2 s each, one after the other).
+    if (!Vulkan::WaitForScreenshots(std::chrono::seconds{5})) {
+        LOG_WARNING(Render_Vulkan, "exiting with screenshots not saved yet");
+    }
+}
 
 bool ProcessEvents(int timeout_ms) {
     // SOTC_SCREENSHOTS="60,95.5,120": screenshots at these times (seconds since start), for

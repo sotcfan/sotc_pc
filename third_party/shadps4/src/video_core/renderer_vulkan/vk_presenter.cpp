@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <csetjmp>
 #include <cstring>
@@ -401,6 +402,20 @@ static bool WritePng(const std::filesystem::path& path, const std::span<const u8
     return stbi_write_png_to_func(callback, &file, width, height, 4, rgba.data(), 0);
 }
 
+// sotcport: screenshots asked for and not saved yet (see WaitForScreenshots).
+static std::atomic<u32> g_screenshots_pending{0};
+
+bool WaitForScreenshots(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (g_screenshots_pending.load(std::memory_order_acquire) != 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    return true;
+}
+
 static void SavePendingScreenshot(const ScreenshotReadback& readback) {
     if (readback.paths.empty()) {
         return;
@@ -411,9 +426,21 @@ static void SavePendingScreenshot(const ScreenshotReadback& readback) {
         return;
     }
 
+    // sotcport: written under a temporary name and renamed when complete, so a screenshot cut
+    // short (the game closed while it was being written) never leaves an empty or partial PNG
+    // under its final name (an empty one was left on 2026-10-14).
     const auto& primary_path = readback.paths.front();
-    if (!WritePng(primary_path, rgba, readback.width, readback.height)) {
+    auto partial_path = primary_path;
+    partial_path += ".part";
+    if (!WritePng(partial_path, rgba, readback.width, readback.height)) {
         LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", primary_path.string());
+        return;
+    }
+    std::error_code rename_error;
+    std::filesystem::rename(partial_path, primary_path, rename_error);
+    if (rename_error) {
+        LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}: {}", primary_path.string(),
+                  rename_error.message());
         return;
     }
 
@@ -732,9 +759,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     DebugState.output_resolution = {frame->width, frame->height};
 
     if (pending_screenshot) {
+        g_screenshots_pending.fetch_add(1, std::memory_order_relaxed); // sotcport
         draw_scheduler.DeferPriorityOperation(
             [deferred_screenshot = std::move(pending_screenshot)]() {
                 SavePendingScreenshot(deferred_screenshot.value());
+                g_screenshots_pending.fetch_sub(1, std::memory_order_release); // sotcport
             });
     }
 

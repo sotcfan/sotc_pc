@@ -77,6 +77,7 @@ std::filesystem::path DefaultDataDir() {
         }
     }
     LOG_INFO("Main", "window closed; exiting");
+    gpu::FinishScreenshots(); // the last F9 screenshots may still be being written
     std::fflush(nullptr);
     std::_Exit(0);
 }

@@ -23,6 +23,9 @@ bool ProcessEvents(int timeout_ms);
 // Saves the next frame the game shows as a PNG (in <data>/gpu/screenshots; the log says where).
 void RequestScreenshot();
 
+// Waits (up to a few seconds) for the screenshots asked for to be written, before exiting.
+void FinishScreenshots();
+
 // How many frames have been presented so far (for the freeze watchdog in main.cpp).
 unsigned long long FramesPresented();
 
