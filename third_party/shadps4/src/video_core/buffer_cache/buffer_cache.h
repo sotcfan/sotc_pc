@@ -112,6 +112,10 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// sotcport (diagnostics): copies what the GPU's arena holds for [device_addr, +size) into
+    /// `out`, changing no state (waits for the GPU). False when it is not all resident.
+    bool PeekGpuMemory(VAddr device_addr, u64 size, u8* out);
+
     /// sotcport: whether the GPU wrote these exact bytes since they were last downloaded
     /// (IsRegionGpuModified answers for whole tracking pages). GPU command thread: with the
     /// two-stage draw pipeline it asks while stage B may add ranges (gpu_modified_mutex).

@@ -433,7 +433,13 @@ void BufferCache::DownloadWindows(std::span<const std::pair<VAddr, u64>> windows
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+    // sotcport: SOTC_STREAM_THRESHOLD=<bytes> raises the size limit (diagnostics: larger
+    // read-only buffers then come straight from memory, not from tracked arena copies).
+    static const u64 stream_threshold = [] {
+        const char* bytes = std::getenv("SOTC_STREAM_THRESHOLD");
+        return bytes ? std::strtoull(bytes, nullptr, 0) : u64{STREAM_THRESHOLD};
+    }();
+    if (!is_written && size <= stream_threshold && !IsRegionGpuModified(device_addr, size)) {
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
@@ -475,6 +481,32 @@ bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionGpuModified(addr, size);
+}
+
+bool BufferCache::PeekGpuMemory(VAddr device_addr, u64 size, u8* out) {
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    const Buffer* arena = address_space[first_block >> blocks_per_arena_page_shift];
+    if (!arena || address_space[last_block >> blocks_per_arena_page_shift] != arena) {
+        return false;
+    }
+    bool resident = true;
+    resident_ranges.ForEachGap(first_block, last_block + 1,
+                               [&](u64, u64) { resident = false; });
+    if (!resident) {
+        return false;
+    }
+    const auto download = staging_pool.Request(size, VideoCore::MemoryType::HostCached);
+    const vk::BufferCopy copy{
+        .srcOffset = device_addr - arena->cpu_addr,
+        .dstOffset = download.offset,
+        .size = size,
+    };
+    runtime.CopyBuffer(arena, download.buffer, std::span{&copy, 1});
+    scheduler.Finish();
+    download.buffer->Invalidate(download.offset, download.size);
+    std::memcpy(out, download.mapped, size);
+    return true;
 }
 
 void BufferCache::SynchronizeDmaBuffers() {

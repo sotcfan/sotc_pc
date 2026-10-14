@@ -84,6 +84,15 @@ std::filesystem::path DefaultDataDir() {
 
 int main(int argc, char** argv) {
     logging::SetThreadName("Main");
+#ifndef _WIN32
+    // SIGUSR1 asks for a thread dump (RunMainLoop waits for it). Blocked before any thread
+    // exists: every thread inherits the mask, so none of them (the window system's, the GPU
+    // layer's) is killed by it.
+    sigset_t dump_signal;
+    sigemptyset(&dump_signal);
+    sigaddset(&dump_signal, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &dump_signal, nullptr);
+#endif
 
     std::filesystem::path game_dir, data_dir = DefaultDataDir();
     loader::LinkerOptions options;

@@ -47,7 +47,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
   Agro overshoot.
 - At 60 FPS the physics is fine, but the game's logic is not: an original PS4 never runs it at 60,
   and some of it breaks (the fifth colossus flies straight up out of its arena). `SOTC_NEO_MODE=1`
-  (the PS4 Pro, which has an official 60 FPS mode) may fix that; untested.
+  (the PS4 Pro, which has an official 60 FPS mode) may fix that; inconclusive.
 - 60 FPS is also not always reached: in heavy scenes the GPU layer cannot keep up.
 
 | Variable | What it does |
@@ -82,16 +82,20 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_WATCH_COPIES=1` | Counts the game's memory copies by memory type and call site (log, every 10 s). Slows the game down; short measurements only. |
 | `SOTC_PACKET_STATS=1` | Statistics of the GPU command packets the game sends. |
 | `SOTC_SRT_FETCH_PAGES=1` | The shader resource walker downloads whole pages the GPU wrote, instead of exact bytes (rules out reads the byte check would miss). |
+| `SOTC_TRACE_FLATBUF=<hash>` | Logs the flattened user data and the samplers the GPU layer gives that shader (hex hash, e.g. `bd2fa723`) at every draw or dispatch. |
+| `SOTC_STREAM_THRESHOLD=<bytes>` | Read-only buffers up to that size are copied straight from game memory at each draw (default 8 KiB) instead of coming from the GPU layer's tracked copies (rules out a missed CPU write). |
 
 ## Native renderer (work in progress)
 
 | Variable | What it does |
 |---|---|
-| `SOTC_RECORD_GNM=1` | Records the game's calls to its GPU library and checks the state model against the GPU registers on every draw. Report: `~/.local/share/sotcport/gnm_recorder.txt` (every 20 s). |
+| `SOTC_RECORD_GNM=1` | Records the game's calls to its GPU library and checks the state model against the GPU registers on every draw. Report: `~/.local/share/sotcport/gnm_recorder.txt` (every 20 s). Much slower (with validation the logos alone take over a minute): the window title then says "diagnostics on: much slower". |
 | `SOTC_RECORD_FRAMES="100,200"` | With `SOTC_RECORD_GNM=1`: writes every call of the frames at those seconds to `gnm_frames/`. |
 | `SOTC_VALIDATE_NATIVE=all` | With `SOTC_RECORD_GNM=1`: runs compute dispatches again on the native renderer's own Vulkan device and compares the results with the GPU layer's. A list of shader hashes (`=1902028a,2ece299b`) checks only those. |
-| `SOTC_VALIDATE_NATIVE_COUNT=<n>` | Checks per shader (default 3). |
-| `SOTC_VALIDATE_NATIVE_DUMP=1` | Saves the SPIR-V and bindings of each check to `~/.local/share/sotcport/native/`. |
+| `SOTC_VALIDATE_NATIVE_DRAWS=all` | With `SOTC_RECORD_GNM=1`: the same for draws (vertex + pixel shader), reported per shader pair. A list of hashes (vertex or pixel shader) checks only the draws that use them. |
+| `SOTC_VALIDATE_NATIVE_COUNT=<n>` | Checks per shader (default 3). A check that matched while changing nothing does not count (up to 30 of them, at most one every 2 s): an empty scene proves little. |
+| `SOTC_VALIDATE_NATIVE_START=<s>` | No checks during the first `s` seconds: the logos run at normal speed, so `SOTC_KEY_SCRIPT` times stay those of a normal session. To check gameplay: `SOTC_VALIDATE_NATIVE_START=70 SOTC_KEY_SCRIPT="36:Escape,38:K,39:K,40:K,41.5:Return,50:Return,54:Return,58:Return,75:W:40"` (skips the opening cinematic, continues the save, walks). |
+| `SOTC_VALIDATE_NATIVE_DUMP=1` | Saves each check to `~/.local/share/sotcport/native/`: SPIR-V, bindings, samplers, flattened user data and the addresses it was read from, the GPU layer's images over each binding, the images and buffers before and after (native and GPU layer). It also compares the inputs (images and buffers the shaders only read) with the GPU layer's, and runs the check twice to tell order-dependent shaders apart. Slow: use with a short list of hashes. |
 | `SOTC_NATIVE_VK_VALIDATION=1` | Turns on the Khronos validation layer for the native renderer's device. |
 | `SOTC_TRACE_GNM=<addresses>` | Intercepts the listed GPU library functions and writes the command packets they produce to `gnm_trace.txt`. |
 | `SOTC_SURVEY_GNM=1` | With `SOTC_RECORD_GNM=1`: counts calls to the other GPU library functions the game uses. |

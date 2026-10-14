@@ -71,6 +71,26 @@ namespace render::vk {
     X(vkCmdPushConstants)                                                                         \
     X(vkCmdDispatch)                                                                              \
     X(vkCmdPipelineBarrier)                                                                       \
+    X(vkCreateImage)                                                                              \
+    X(vkDestroyImage)                                                                             \
+    X(vkGetImageMemoryRequirements)                                                               \
+    X(vkBindImageMemory)                                                                          \
+    X(vkCreateImageView)                                                                          \
+    X(vkDestroyImageView)                                                                         \
+    X(vkCreateSampler)                                                                            \
+    X(vkDestroySampler)                                                                           \
+    X(vkCmdCopyBufferToImage)                                                                     \
+    X(vkCmdCopyImageToBuffer)                                                                     \
+    X(vkCmdCopyBuffer)                                                                            \
+    X(vkGetBufferDeviceAddress)                                                                   \
+    X(vkCreateGraphicsPipelines)                                                                  \
+    X(vkCmdBeginRendering)                                                                        \
+    X(vkCmdEndRendering)                                                                          \
+    X(vkCmdBindVertexBuffers)                                                                     \
+    X(vkCmdBindIndexBuffer)                                                                       \
+    X(vkCmdDraw)                                                                                  \
+    X(vkCmdDrawIndexed)                                                                           \
+    X(vkCmdSetColorWriteMaskEXT)                                                                  \
     X(vkCreateFence)                                                                              \
     X(vkDestroyFence)                                                                             \
     X(vkWaitForFences)                                                                            \
@@ -92,6 +112,12 @@ struct HostBuffer {
     u64 size = 0;
 };
 
+// An image in device-local memory.
+struct Image {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+
 class Device {
 public:
     // The device, created on first use; null if Vulkan or a suitable GPU is missing (logged).
@@ -102,8 +128,18 @@ public:
     // minStorageBufferOffsetAlignment: storage buffers are bound at multiples of this.
     u64 StorageAlignment() const { return storage_alignment_; }
 
-    bool CreateHostBuffer(u64 size, HostBuffer& out);
+    // `device_address`: also usable through its device address (vkGetBufferDeviceAddress).
+    bool CreateHostBuffer(u64 size, HostBuffer& out, bool device_address = false);
+    u64 DeviceAddress(const HostBuffer& buffer);
     void Destroy(HostBuffer& buffer);
+    bool CreateImage(const VkImageCreateInfo& info, Image& out);
+    void Destroy(Image& image);
+    // maxSamplerAnisotropy.
+    float MaxAnisotropy() const { return max_anisotropy_; }
+    // VK_EXT_image_view_min_lod is on (views clamped to a minimum LOD).
+    bool HasMinLod() const { return has_min_lod_; }
+    // The color write mask can be dynamic state (VK_EXT_extended_dynamic_state3).
+    bool HasDynamicWriteMask() const { return has_dynamic_write_mask_; }
 
     // Records commands with `record`, submits them to the compute queue and waits for them.
     bool Run(const std::function<void(VkCommandBuffer)>& record);
@@ -121,6 +157,10 @@ private:
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
     u32 host_memory_type_ = ~0u;
+    VkPhysicalDeviceMemoryProperties memory_properties_{};
+    float max_anisotropy_ = 1.0f;
+    bool has_min_lod_ = false;
+    bool has_dynamic_write_mask_ = false;
     u64 storage_alignment_ = 256;
 };
 

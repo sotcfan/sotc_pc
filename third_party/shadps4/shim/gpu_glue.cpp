@@ -38,6 +38,7 @@
 #include "hle/kernel/gpu_memory.h"
 #include "input/input.h"
 #include "loader/crash.h"
+#include "render/shader_translate.h"
 #include "perf_temp.h"
 #include "sdl_window.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -46,6 +47,7 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_runtime.h"
 
 namespace Core::Loader {
 class SymbolsResolver;
@@ -717,7 +719,14 @@ Initialize(int sdk_version) {
         LOG_CRITICAL(Frontend, "SDL_Init failed: {}", SDL_GetError());
         return false;
     }
-    g_window = new Frontend::WindowSDL(1280, 720, "sotcport");
+    // The diagnostics that record or check every GPU command make the game much slower (the
+    // logos alone take minutes): say so in the title, so such a window is not taken for a
+    // normal session.
+    const bool diagnostics = std::getenv("SOTC_RECORD_GNM") ||
+                             std::getenv("SOTC_VALIDATE_NATIVE") ||
+                             std::getenv("SOTC_VALIDATE_NATIVE_DRAWS");
+    g_window = new Frontend::WindowSDL(
+        1280, 720, diagnostics ? "sotcport (diagnostics on: much slower)" : "sotcport");
     input::Initialize();
     Libraries::GnmDriver::RegisterLib(nullptr);
     Libraries::VideoOut::RegisterLib(nullptr);
@@ -811,12 +820,219 @@ std::uint64_t ReadIndirectArgsAddress() {
     return liverpool->IndirectArgsAddress();
 }
 
+void ReadRegisterFile(std::uint32_t* out) {
+    std::memcpy(out, liverpool->regs.reg_array.data(), sizeof(liverpool->regs.reg_array));
+}
+
+void ReadRenderTargetExtents(std::uint32_t* color, std::uint32_t& depth) {
+    for (u32 i = 0; i < AmdGpu::NUM_COLOR_BUFFERS; i++) {
+        color[i] = liverpool->last_cb_extent[i].raw;
+    }
+    depth = liverpool->last_db_extent.raw;
+}
+
+bool IsFastCleared(std::uint64_t meta_address, std::uint32_t slice, bool tracked) {
+    if (!Core::g_rasterizer) {
+        return false;
+    }
+    Core::g_rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonReadback);
+    const auto& cache = Core::g_rasterizer->GetTextureCache();
+    if (cache.IsMeta(meta_address)) {
+        return cache.IsMetaCleared(meta_address, slice);
+    }
+    // FindRenderTarget / FindDepthTarget register it before the check, with clear_mask -1
+    // (MetaDataInfo; a depth image made by overlap resolution starts at 0 instead: not seen).
+    return tracked;
+}
+
 void SyncGuestRange(std::uint64_t address, std::uint64_t size) {
     // What a CPU read of GPU-written memory does (readbacks "Precise"), called directly: the
     // packet observer runs on the command processor thread, which holds what assume_locks means.
     if (Core::g_rasterizer && size) {
         Core::g_rasterizer->ReadMemory(address, size, /*assume_locks=*/true);
     }
+}
+
+// The GPU layer's image for a binding: like TextureCache::FindImage's perfect match, but with
+// the same texel size instead of a compatible format (the bytes are compared, so they must be
+// laid out alike) and any number of mips laid out alike; the image with the most of the
+// binding's mips (`levels`). From the packet observer (stage B is drained first).
+// `stencil_plane`: the binding is a depth target's stencil plane seen as an 8-bit texture (an
+// image at the stencil address that FindDepthTarget associated with the depth image): binding it,
+// the GPU layer redirects to the depth image's stencil aspect (BindTextures, GetAssociatedDepth),
+// which is where the stencil values live (only on its GPU); that depth image is returned.
+static VideoCore::Image* FindLayerImage(const render::translate::ImageBinding& binding,
+                                        u32& levels, bool& stencil_plane) {
+    auto& rasterizer = *Core::g_rasterizer;
+    rasterizer.DrainDrawPipe(Vulkan::DrawPipe::ReasonReadback); // stage B touches the caches
+    auto& cache = rasterizer.GetTextureCache();
+    VideoCore::Image* found = nullptr;
+    levels = 0;
+    stencil_plane = false;
+    if (binding.num_bits == 8 && !binding.block) {
+        cache.ForEachImageInRegion(binding.address, 1, [&](VideoCore::ImageId, VideoCore::Image& image) {
+            if (found || image.info.guest_address != binding.address) {
+                return;
+            }
+            if (const auto depth_id = cache.GetAssociatedDepth(image)) {
+                VideoCore::Image& depth = cache.GetImage(depth_id);
+                if (depth.info.props.has_stencil && depth.info.size.width == binding.extent[0] &&
+                    depth.info.size.height == binding.extent[1]) {
+                    found = &depth;
+                }
+            }
+        });
+        if (found) {
+            levels = 1;
+            stencil_plane = true;
+            return found;
+        }
+    }
+    cache.ForEachImageInRegion(binding.address, 1, [&](VideoCore::ImageId, VideoCore::Image& image) {
+        const auto& info = image.info;
+        if (info.guest_address != binding.address || info.size.width != binding.extent[0] ||
+            info.size.height != binding.extent[1] || info.size.depth != binding.extent[2] ||
+            info.num_bits != binding.num_bits || bool(info.props.is_block) != binding.block ||
+            info.num_samples != 1 || info.resources.layers < binding.layers) {
+            return;
+        }
+        u32 common = std::min<u32>(info.resources.levels, binding.copies.size());
+        for (u32 m = 0; m < common; m++) {
+            if (info.mips_layout[m].offset != binding.copies[m].buffer_offset) {
+                common = m;
+            }
+        }
+        if (common > levels) {
+            found = &image;
+            levels = common;
+        }
+    });
+    return found;
+}
+
+std::uint32_t ReadLayerImage(const render::translate::ImageBinding& binding, bool newer_only,
+                             std::uint8_t* out, std::string& why) {
+    if (!Core::g_rasterizer) {
+        why = "no GPU layer";
+        return 0;
+    }
+    u32 levels = 0;
+    bool stencil_plane = false;
+    VideoCore::Image* found = FindLayerImage(binding, levels, stencil_plane);
+    if (!found) {
+        why = "the GPU layer has no image for it";
+        return 0;
+    }
+    auto& rasterizer = *Core::g_rasterizer;
+    auto& cache = rasterizer.GetTextureCache();
+    VideoCore::Image& image = *found;
+    cache.RefreshImage(image);
+    if (newer_only && False(image.flags & VideoCore::ImageFlagBits::GpuModified)) {
+        why = "the GPU layer's image holds no GPU writes";
+        return 0;
+    }
+    auto& runtime = rasterizer.GetRuntime();
+    const auto staging = runtime.GetStagingPool().Request(binding.guest_size,
+                                                          VideoCore::MemoryType::HostCached, 16);
+    const auto aspect = stencil_plane            ? vk::ImageAspectFlagBits::eStencil
+                        : image.info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
+                                                    : vk::ImageAspectFlagBits::eColor;
+    const u32 layers = binding.volume ? 1 : binding.layers;
+    std::vector<vk::BufferImageCopy> copies;
+    for (u32 m = 0; m < levels; m++) {
+        const auto& c = binding.copies[m];
+        copies.push_back({
+            .bufferOffset = staging.offset + c.buffer_offset,
+            .bufferRowLength = c.row_length,
+            .bufferImageHeight = c.image_height,
+            .imageSubresource = {aspect, m, 0, layers},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {c.width, c.height, c.depth},
+        });
+    }
+    runtime.DownloadImage(&image, staging.buffer, copies);
+    rasterizer.GetScheduler().Finish();
+    staging.Invalidate();
+    binding.ForEachRow(levels, [&](u64 offset, u64 bytes) {
+        std::memcpy(out + offset, staging.mapped + offset, bytes);
+    });
+    return levels;
+}
+
+bool ReadLayerStencil(const render::translate::ImageBinding& binding, std::uint8_t* out,
+                      std::string& why) {
+    if (!Core::g_rasterizer) {
+        why = "no GPU layer";
+        return false;
+    }
+    u32 levels = 0;
+    bool stencil_plane = false;
+    VideoCore::Image* image = FindLayerImage(binding, levels, stencil_plane);
+    if (!image || !image->info.props.has_stencil) {
+        why = image ? "the GPU layer's image has no stencil" : "the GPU layer has no image for it";
+        return false;
+    }
+    auto& rasterizer = *Core::g_rasterizer;
+    auto& runtime = rasterizer.GetRuntime();
+    const u64 size = binding.StencilBytes();
+    const auto staging =
+        runtime.GetStagingPool().Request(size, VideoCore::MemoryType::HostCached, 16);
+    const vk::BufferImageCopy copy{
+        .bufferOffset = staging.offset,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = {vk::ImageAspectFlagBits::eStencil, 0, 0,
+                             binding.volume ? 1u : binding.layers},
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {binding.extent[0], binding.extent[1], 1},
+    };
+    runtime.DownloadImage(image, staging.buffer, std::span{&copy, 1});
+    rasterizer.GetScheduler().Finish();
+    staging.Invalidate();
+    std::memcpy(out, staging.mapped, size);
+    return true;
+}
+
+std::string DescribeLayerImages(const render::translate::ImageBinding& binding) {
+    if (!Core::g_rasterizer || !binding.address) {
+        return {};
+    }
+    u32 levels = 0;
+    bool stencil_plane = false;
+    const VideoCore::Image* taken = FindLayerImage(binding, levels, stencil_plane);
+    std::string text;
+    if (stencil_plane) {
+        text += fmt::format("    the stencil plane of the GPU layer's depth image at {:#x} "
+                            "(taken)\n",
+                            taken->info.guest_address);
+    }
+    Core::g_rasterizer->GetTextureCache().ForEachImageInRegion(
+        binding.address, binding.guest_size, [&](VideoCore::ImageId id, VideoCore::Image& image) {
+            const auto& info = image.info;
+            text += fmt::format(
+                "    layer image {}: at {:+#x} {} {}x{}x{} {} bits{} tile {} array {} pitch {} "
+                "size {:#x} mips {} layers {} flags {:#x}{}\n",
+                id.index, s64(info.guest_address) - s64(binding.address),
+                vk::to_string(info.pixel_format), info.size.width, info.size.height,
+                info.size.depth, info.num_bits, info.props.is_block ? " block" : "",
+                u32(info.tile_mode), u32(info.array_mode), info.pitch, info.guest_size,
+                info.resources.levels, info.resources.layers, u32(image.flags),
+                &image == taken ? " (taken)" : "");
+        });
+    return text;
+}
+
+bool IsGpuModified(std::uint64_t address, std::uint64_t size) {
+    return Core::g_rasterizer &&
+           Core::g_rasterizer->GetBufferCache().IsRegionGpuModified(address, size);
+}
+
+bool PeekLayerBuffer(std::uint64_t address, std::uint64_t size, std::uint8_t* out) {
+    if (!Core::g_rasterizer) {
+        return false;
+    }
+    Core::g_rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonReadback);
+    return Core::g_rasterizer->GetBufferCache().PeekGpuMemory(address, size, out);
 }
 
 unsigned long long FramesPresented() {

@@ -31,6 +31,21 @@ constexpr const char* WantedExtensions[] = {
     "VK_AMD_shader_image_load_store_lod",
     "VK_AMD_shader_trinary_minmax",
     "VK_AMD_gcn_shader",
+    // Draws, as the GPU layer renders them: clip space z in [-w, w], no depth clipping, the
+    // last vertex provoking, depth ranges outside [0, 1].
+    "VK_EXT_depth_clip_control",
+    "VK_EXT_depth_clip_enable",
+    "VK_EXT_provoking_vertex",
+    "VK_EXT_depth_range_unrestricted",
+    // Out-of-bounds buffer and image accesses read 0, as the GCN hardware's bounds checks
+    // (num_records, image extents) make them, and as the GPU layer has them.
+    "VK_EXT_robustness2",
+    // Views clamped to a minimum LOD (the T#'s MIN_LOD), as the GPU layer's.
+    "VK_EXT_image_view_min_lod",
+    // The color write mask as dynamic state, as the GPU layer sets it: RADV then exports pixel
+    // shader colors at 32 bits and the color blocks round them (a static mask lets it convert
+    // to 16 bits in the shader, rounding toward zero: 1 ULP apart from the layer's).
+    "VK_EXT_extended_dynamic_state3",
 };
 
 const char* ResultName(VkResult result) {
@@ -132,6 +147,7 @@ bool Device::Initialize() {
     }
     api_.vkGetPhysicalDeviceProperties2(physical_, &properties);
     storage_alignment_ = properties.properties.limits.minStorageBufferOffsetAlignment;
+    max_anisotropy_ = properties.properties.limits.maxSamplerAnisotropy;
 
     // A queue family with compute (the graphics family has it too; one queue is enough here).
     api_.vkGetPhysicalDeviceQueueFamilyProperties(physical_, &count, nullptr);
@@ -168,7 +184,8 @@ bool Device::Initialize() {
     }
 
     // Query the features (core 1.1-1.3 plus the extensions'), then enable all of them: the
-    // translated shaders declare what they use. robustBufferAccess stays off, as on the PS4.
+    // translated shaders declare what they use. Robust accesses included (robustness2 needs
+    // robustBufferAccess too): out of bounds reads give 0, as on the PS4's GPU.
     VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR workgroup_layout{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR};
     VkPhysicalDeviceShaderClockFeaturesKHR clock{
@@ -179,6 +196,18 @@ bool Device::Initialize() {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT};
     VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR barycentric{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR};
+    VkPhysicalDeviceDepthClipControlFeaturesEXT clip_control{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
+    VkPhysicalDeviceDepthClipEnableFeaturesEXT clip_enable{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT};
+    VkPhysicalDeviceProvokingVertexFeaturesEXT provoking{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT};
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    VkPhysicalDeviceImageViewMinLodFeaturesEXT min_lod{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynamic_state3{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
     VkPhysicalDeviceVulkan13Features features13{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     VkPhysicalDeviceVulkan12Features features12{
@@ -199,8 +228,16 @@ bool Device::Initialize() {
     chain(has("VK_EXT_shader_atomic_float"), atomic_float);
     chain(has("VK_EXT_shader_atomic_float2"), atomic_float2);
     chain(has("VK_KHR_fragment_shader_barycentric"), barycentric);
+    chain(has("VK_EXT_depth_clip_control"), clip_control);
+    chain(has("VK_EXT_depth_clip_enable"), clip_enable);
+    chain(has("VK_EXT_provoking_vertex"), provoking);
+    chain(has("VK_EXT_robustness2"), robustness2);
+    chain(has("VK_EXT_image_view_min_lod"), min_lod);
+    chain(has("VK_EXT_extended_dynamic_state3"), dynamic_state3);
     api_.vkGetPhysicalDeviceFeatures2(physical_, &features);
-    features.features.robustBufferAccess = VK_FALSE;
+    has_min_lod_ = has("VK_EXT_image_view_min_lod") && min_lod.minLod;
+    has_dynamic_write_mask_ = has("VK_EXT_extended_dynamic_state3") &&
+                              dynamic_state3.extendedDynamicState3ColorWriteMask;
 
     const float priority = 1.0f;
     const VkDeviceQueueCreateInfo queue_info{
@@ -231,6 +268,7 @@ bool Device::Initialize() {
     // Host-visible, coherent memory: on this GPU (resizable BAR) it can also be device-local.
     VkPhysicalDeviceMemoryProperties memory{};
     api_.vkGetPhysicalDeviceMemoryProperties(physical_, &memory);
+    memory_properties_ = memory;
     constexpr VkMemoryPropertyFlags host =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     for (u32 i = 0; i < memory.memoryTypeCount; i++) {
@@ -260,13 +298,15 @@ bool Device::Initialize() {
     return host_memory_type_ != ~0u;
 }
 
-bool Device::CreateHostBuffer(u64 size, HostBuffer& out) {
+bool Device::CreateHostBuffer(u64 size, HostBuffer& out, bool device_address) {
     out = {};
     const VkBufferCreateInfo info{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = size ? size : 4,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                 (device_address ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u),
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
     if (api_.vkCreateBuffer(device_, &info, nullptr, &out.buffer) != VK_SUCCESS) {
@@ -274,8 +314,13 @@ bool Device::CreateHostBuffer(u64 size, HostBuffer& out) {
     }
     VkMemoryRequirements requirements{};
     api_.vkGetBufferMemoryRequirements(device_, out.buffer, &requirements);
+    const VkMemoryAllocateFlagsInfo flags{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+    };
     const VkMemoryAllocateInfo allocate{
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = device_address ? &flags : nullptr,
         .allocationSize = requirements.size,
         .memoryTypeIndex = host_memory_type_,
     };
@@ -289,6 +334,58 @@ bool Device::CreateHostBuffer(u64 size, HostBuffer& out) {
     out.data = static_cast<u8*>(data);
     out.size = info.size;
     return true;
+}
+
+bool Device::CreateImage(const VkImageCreateInfo& info, Image& out) {
+    out = {};
+    if (api_.vkCreateImage(device_, &info, nullptr, &out.image) != VK_SUCCESS) {
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    api_.vkGetImageMemoryRequirements(device_, out.image, &requirements);
+    // The first device-local type the image accepts (any accepted type otherwise).
+    u32 type = ~0u;
+    for (u32 i = 0; i < memory_properties_.memoryTypeCount; i++) {
+        if (!(requirements.memoryTypeBits & (1u << i))) {
+            continue;
+        }
+        if (type == ~0u) {
+            type = i;
+        }
+        if (memory_properties_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+            type = i;
+            break;
+        }
+    }
+    const VkMemoryAllocateInfo allocate{
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = type,
+    };
+    if (type == ~0u || api_.vkAllocateMemory(device_, &allocate, nullptr, &out.memory) != VK_SUCCESS ||
+        api_.vkBindImageMemory(device_, out.image, out.memory, 0) != VK_SUCCESS) {
+        Destroy(out);
+        return false;
+    }
+    return true;
+}
+
+void Device::Destroy(Image& image) {
+    if (image.image) {
+        api_.vkDestroyImage(device_, image.image, nullptr);
+    }
+    if (image.memory) {
+        api_.vkFreeMemory(device_, image.memory, nullptr);
+    }
+    image = {};
+}
+
+u64 Device::DeviceAddress(const HostBuffer& buffer) {
+    const VkBufferDeviceAddressInfo info{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = buffer.buffer,
+    };
+    return api_.vkGetBufferDeviceAddress(device_, &info);
 }
 
 void Device::Destroy(HostBuffer& buffer) {

@@ -1511,6 +1511,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             } else if (desc.buffer_type == Shader::BufferType::Flatbuf) {
                 auto& vk_buffer = buffer_cache.GetStreamBuffer();
                 const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
+                // sotcport: SOTC_TRACE_FLATBUF=<shader hash, hex> logs the flattened user data
+                // a shader gets (diagnostics: the native renderer's validation compares it).
+                static const u64 trace_flatbuf = [] {
+                    const char* hash = std::getenv("SOTC_TRACE_FLATBUF");
+                    return hash ? std::strtoull(hash, nullptr, 16) : 0ull;
+                }();
+                if (trace_flatbuf && (stage.pgm_hash & 0xffffffffull) == trace_flatbuf) {
+                    std::string words;
+                    for (const u32 word : stage.FlatUserData()) {
+                        words += fmt::format(" {:08x}", word);
+                    }
+                    LOG_INFO(Render, "flatbuf of {:#x}:{}", stage.pgm_hash, words);
+                }
                 const u64 offset =
                     vk_buffer.Copy(stage.FlatUserData().data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
@@ -1759,6 +1772,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         }
         const auto vk_sampler =
             texture_cache.GetSampler(ssharp, GpuRegs().ta_bc_base, sampler.is_depth);
+        // sotcport: SOTC_TRACE_FLATBUF=<shader hash> also logs the samplers it gets.
+        static const u64 trace_sampler = [] {
+            const char* hash = std::getenv("SOTC_TRACE_FLATBUF");
+            return hash ? std::strtoull(hash, nullptr, 16) : 0ull;
+        }();
+        if (trace_sampler && (stage.pgm_hash & 0xffffffffull) == trace_sampler) {
+            using namespace Vulkan::LiverpoolToVK;
+            LOG_INFO(Render, "sampler of {:#x}: filter {}/{} mip {} address {}/{}/{} lod bias {} "
+                             "lod {}..{} aniso {} ({}) depth {}",
+                     stage.pgm_hash, u32(Filter(ssharp.xy_mag_filter)),
+                     u32(Filter(ssharp.xy_min_filter)), u32(MipFilter(ssharp.mip_filter)),
+                     u32(ClampMode(ssharp.clamp_x)), u32(ClampMode(ssharp.clamp_y)),
+                     u32(ClampMode(ssharp.clamp_z)), ssharp.LodBias(), ssharp.MinLod(),
+                     ssharp.MaxLod(),
+                     AmdGpu::IsAnisoFilter(ssharp.xy_mag_filter) ||
+                         AmdGpu::IsAnisoFilter(ssharp.xy_min_filter),
+                     ssharp.MaxAniso(), sampler.is_depth);
+        }
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;

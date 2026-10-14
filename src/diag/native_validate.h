@@ -30,7 +30,13 @@ bool NativeValidationEnabled();
 void ValidateDispatchBefore(const render::RegisterSnapshot& snapshot, const u32* packet,
                             bool indirect, bool compute_queue);
 
-// At every packet, before anything else: completes the check of the previous dispatch.
+// At a draw packet (graphics queue), with the model's state for it (SOTC_VALIDATE_NATIVE_DRAWS:
+// "all" or vertex/pixel shader hashes). The draw runs on the native renderer
+// (render/native_draw) with each color target as the GPU layer holds it; at the next packet the
+// targets are compared with the GPU layer's.
+void ValidateDrawBefore(const render::RegisterSnapshot& snapshot, const u32* packet);
+
+// At every packet, before anything else: completes the check of the previous dispatch or draw.
 void ValidateAfterPacket();
 
 void WriteNativeValidationReport(std::FILE* file);
