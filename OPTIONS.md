@@ -67,8 +67,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_VK_RECORD_THREAD=0` | on | Turns off recording Vulkan commands on a separate thread. |
 | `SOTC_FLUSH_EVERY=<n>` | 256 | With the draw pipeline, submits GPU work early every `n` draws and dispatches, so the GPU starts sooner. |
 | `SOTC_SLOW_PENDING_OPS=1` | off | Goes back to checking pending GPU operations with a system call per draw (A/B measurements). |
-| `SOTC_SHADOW_COPY=1` | off | Experimental. The game copies tables of constants and descriptors with a small compute shader, and later draws read them: the command processor thread then had to wait for the GPU (~0.5 ms, up to ~1,500 times a second). The CPU now computes those copies too, as the commands arrive, so nothing waits (the GPU still runs them). +15–20% frames per second in heavy scenes. `SOTC_VERIFY_SHADOW_COPY=1` compares every 7th one with what the GPU wrote (slow; diagnostics). |
-| `SOTC_SRT_PATCHES=1` | off | Experimental. Constants a shader reads that the GPU itself wrote are copied on the GPU, right before the draw, instead of being read back on the CPU. Use with `SOTC_SHADOW_COPY=1` (alone it is slower). |
+| `SOTC_NO_SHADOW_COPY=1` | on | The game copies tables of constants and descriptors with a small compute shader, and later draws read them: the command processor thread then had to wait for the GPU (~0.5 ms, up to ~1,500 times a second). The CPU computes those copies too, as the commands arrive, so nothing waits (the GPU still runs them). +15–20% frames per second in heavy scenes. This turns it off. `SOTC_VERIFY_SHADOW_COPY=1` compares every 7th copy with what the GPU wrote (slow; diagnostics). |
+| `SOTC_NO_SRT_PATCHES=1` | on | Constants a shader reads that the GPU itself computed are copied on the GPU, right before the draw, instead of being read back on the CPU. This turns it off. |
 
 ## Diagnostics
 

@@ -57,9 +57,10 @@ bool CheckSrtReads(Shader::Info& info, const u64* begin, const u64* end) {
     // into the flattened user data on the GPU, in GPU order, right before the shader runs
     // (info.srt_patches, BindBuffers). The rest is fetched as before. Without a map that matches
     // the log (it always should), every read counts as one the CPU needs.
-    // SOTC_SRT_PATCHES=1 turns it on (off by default: measured slower so far, see
-    // ESCOPO_ATUAL.md, H1).
-    static const bool no_patches = std::getenv("SOTC_SRT_PATCHES") == nullptr;
+    // SOTC_NO_SRT_PATCHES=1 fetches everything (A/B measurements). Without the shadow copies
+    // below this was slower (every walk of a never-downloaded table became a patch); with them
+    // only data the GPU really computes is left to the GPU.
+    static const bool no_patches = std::getenv("SOTC_NO_SRT_PATCHES") != nullptr;
     const std::span<const u16> map = info.srt_read_map;
     const bool use_map = !no_patches && map.size() == static_cast<size_t>(end - begin);
     // Reads come in runs from the same table: decide per 4 KiB page whether the GPU wrote any of
@@ -649,10 +650,10 @@ void Rasterizer::VerifyShadowCopy() {
 // for work recorded before and after), without marking them GPU-modified.
 // Only when the inputs are current in CPU memory (nothing GPU-written or still queued for stage
 // B), the formats copy bits unchanged, and the dispatch has the shape the code relies on.
-// SOTC_SHADOW_COPY=1 turns it on (experimental until verified in play).
+// SOTC_NO_SHADOW_COPY=1 turns it off (A/B measurements).
 bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     constexpr u64 FillCopyShaderHash = 0x50784801;
-    static const bool disabled = std::getenv("SOTC_SHADOW_COPY") == nullptr;
+    static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr;
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     if (disabled || cs.pgm_hash != FillCopyShaderHash) {
         return false;
