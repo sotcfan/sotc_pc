@@ -540,6 +540,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     };
 
     ImageId image_id{};
+    const u64 start_generation = registry_generation; // sotcport: see LastFindWasDirect
 
     // sotcport: a perfect match starts at the same address, so it is registered in the
     // first page of the range. Look there before walking every page of the image (a 2048x2048
@@ -611,6 +612,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
         }
     }
+    // sotcport: see LastFindWasDirect. Overlap resolution that changed nothing (a view of an
+    // image already there, like a shadow cascade's slice of the cascade array) is as good as a
+    // perfect match; anything with side effects (expanding, converting, copying, freeing)
+    // registers or unregisters images.
+    last_find_direct = registry_generation == start_generation;
     // Create and register a new image
     if (!image_id) {
         image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
@@ -859,6 +865,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    ++registry_generation; // sotcport
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image_lru_cache.Insert(image, gc_tick);
     const auto& info = image.info;
@@ -877,6 +884,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
+    ++registry_generation; // sotcport
     image_lru_cache.Free(image);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {

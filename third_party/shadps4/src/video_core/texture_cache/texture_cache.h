@@ -119,6 +119,23 @@ public:
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
+    /// sotcport: changes whenever an image is registered or unregistered. With the same registry,
+    /// FindImage gives the same image (and view) for the same description when its last call
+    /// changed nothing on the way (LastFindWasDirect: no image expanded, converted, copied or
+    /// freed): callers can keep that result (see UseFoundImage).
+    [[nodiscard]] u64 RegistryGeneration() const noexcept {
+        return registry_generation;
+    }
+    [[nodiscard]] bool LastFindWasDirect() const noexcept {
+        return last_find_direct;
+    }
+    /// sotcport: what FindImage does to the image it returns, for a kept result.
+    void UseFoundImage(ImageId image_id) {
+        Image& image = slot_images[image_id];
+        image.tick_accessed_last = scheduler.CurrentTick();
+        TouchImage(image);
+    }
+
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
@@ -334,6 +351,9 @@ private:
     void TouchImage(Image& image) {
         image_lru_cache.Touch(image, gc_tick);
     }
+
+    u64 registry_generation = 0; ///< sotcport: see RegistryGeneration
+    bool last_find_direct = false; ///< sotcport: see LastFindWasDirect
 
     /// Removes image from the cache and schedules it for deletion.
     void FreeImage(ImageId image_id) {

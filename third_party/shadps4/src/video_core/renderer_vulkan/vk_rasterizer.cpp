@@ -283,6 +283,32 @@ bool Rasterizer::FilterDraw() {
     return true;
 }
 
+template <typename Build>
+VideoCore::ImageId Rasterizer::FindTargetImage(TargetCacheEntry& entry, std::span<const u32> key,
+                                    ImageBinding& binding, Build&& build) {
+    // SOTC_NO_TARGET_CACHE=1 looks every target up again (A/B measurements).
+    static const bool disabled = std::getenv("SOTC_NO_TARGET_CACHE") != nullptr;
+    ASSERT(key.size() <= entry.key.size());
+    if (!disabled && entry.generation == texture_cache.RegistryGeneration() &&
+        entry.key_words == key.size() &&
+        std::equal(key.begin(), key.end(), entry.key.begin())) {
+        binding.desc = entry.binding.desc;
+        texture_cache.UseFoundImage(entry.binding.image_id);
+        return entry.binding.image_id;
+    }
+    build();
+    const VideoCore::ImageId image_id = texture_cache.FindImage(binding.desc);
+    if (texture_cache.LastFindWasDirect()) {
+        entry.generation = texture_cache.RegistryGeneration();
+        std::ranges::copy(key, entry.key.begin());
+        entry.key_words = static_cast<u32>(key.size());
+        entry.binding = {image_id, binding.desc};
+    } else {
+        entry.generation = ~u64{0};
+    }
+    return image_id;
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -302,8 +328,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             continue;
         }
         const auto& hint = CbExtents()[cb];
-        std::construct_at(&desc, col_buf, hint);
-        image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+        struct {
+            AmdGpu::ColorBuffer buffer;
+            AmdGpu::CbDbExtent hint;
+        } key{col_buf, hint};
+        image_id = bound_images.emplace_back(FindTargetImage(
+            cb_target_cache[cb], {reinterpret_cast<const u32*>(&key), sizeof(key) / 4},
+            cb_descs[cb], [&] { std::construct_at(&desc, col_buf, hint); }));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
     }
@@ -313,9 +344,19 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& hint = DbExtent();
         auto& [image_id, desc] = db_desc;
-        std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
-                          htile_address, hint);
-        image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+        struct {
+            AmdGpu::DepthBuffer buffer;
+            AmdGpu::DepthView view;
+            AmdGpu::DepthControl control;
+            u64 htile_address;
+            AmdGpu::CbDbExtent hint;
+            u32 pad;
+        } key{regs.depth_buffer, regs.depth_view, regs.depth_control, htile_address, hint, 0};
+        image_id = bound_images.emplace_back(FindTargetImage(
+            db_target_cache, {reinterpret_cast<const u32*>(&key), sizeof(key) / 4}, db_desc, [&] {
+                std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
+                                  htile_address, hint);
+            }));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
     } else {
@@ -920,6 +961,9 @@ bool Rasterizer::IsGpuSideThread() const {
 void Rasterizer::DrainDrawPipe(u32 reason) {
     if (draw_pipe && !DrawPipe::OnStageB() && OnStageA()) {
         draw_pipe->Drain(reason);
+        // sotcport: stage A may record work of its own now (readbacks, uploads): bindings kept
+        // by stage B for its next draw are no longer known to be current (see BindMemo).
+        ++bind_packet;
     }
 }
 
@@ -1254,6 +1298,7 @@ bool Rasterizer::PendingFenceMeets(const AmdGpu::PM4CmdWaitRegMem& wait) {
 
 void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
     auto& self = *static_cast<Rasterizer*>(context);
+    ++self.bind_packet; // sotcport: see BindMemo
     if (reinterpret_cast<const TaskHeader*>(data)->kind == static_cast<u32>(PacketKind::Task)) {
         const auto& task = *reinterpret_cast<const TaskHeader*>(data);
         Scheduler::pipe_busy.store(&self.scheduler, std::memory_order_relaxed); // TEMP
@@ -1391,6 +1436,25 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         IsComputeImageClear(pipeline)) {
         return false;
     }
+    // sotcport: ~70% of the draws bind exactly what the draw before them did (same pipeline,
+    // buffers, textures, samplers and targets; only the flattened user data differs). Then the
+    // descriptors of the previous draw are reused and only the per-draw parts are redone
+    // (ReuseBindings), as long as nothing ran in between (BindMemo::packet) and the texture
+    // cache's registry is the same. SOTC_NO_BIND_MEMO=1 binds everything every time.
+    const bool memo_eligible = BuildBindKey(pipeline);
+    if (memo_eligible && bind_memo.packet + 1 == bind_packet && bind_memo.pipeline == pipeline &&
+        bind_memo.texture_generation == texture_cache.RegistryGeneration() &&
+        bind_memo.key == bind_key) {
+        ReuseBindings(pipeline);
+        bind_memo.packet = bind_packet;
+        return true;
+    }
+    bind_memo.packet = ~u64{0};
+    memo_recording = memo_eligible;
+    bind_memo.dynamics.clear();
+    const size_t first_bound_buffer = bound_buffers.size();
+    const size_t first_bound_image = bound_images.size();
+    memo_first_bound_buffer = first_bound_buffer;
 
     set_write_index = 0;
     set_writes.clear();
@@ -1402,8 +1466,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(GpuRegs());
+    memo_stage = 0;
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
+            ++memo_stage;
             continue;
         }
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
@@ -1411,13 +1477,135 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
         uses_dma |= stage->uses_dma;
+        ++memo_stage;
     }
 
     if (uses_dma) {
         buffer_cache.SynchronizeDmaBuffers();
     }
 
+    if (memo_recording) {
+        memo_recording = false;
+        // Not with a texture that is also a target here, or bound as storage elsewhere: its
+        // layout changes around the draw.
+        bool reusable = true;
+        for (size_t i = first_bound_image; i < bound_images.size(); ++i) {
+            const auto& image = texture_cache.GetImage(bound_images[i]);
+            reusable &= !image.binding.is_target && !image.binding.force_general;
+        }
+        if (reusable) {
+            bind_memo.packet = bind_packet;
+            bind_memo.pipeline = pipeline;
+            bind_memo.texture_generation = texture_cache.RegistryGeneration();
+            std::swap(bind_memo.key, bind_key);
+            bind_memo.bound_buffers.assign(bound_buffers.begin() + first_bound_buffer,
+                                           bound_buffers.end());
+            bind_memo.bound_images.assign(bound_images.begin() + first_bound_image,
+                                          bound_images.end());
+            bind_memo.buf_offsets = push_data.buf_offsets;
+        }
+    }
     return true;
+}
+
+bool Rasterizer::BuildBindKey(const Pipeline* pipeline) {
+    // What the bindings of a draw depend on besides the texture cache's registry: the pipeline,
+    // the targets found for it, the border color base, and every descriptor (V#, T#, S#). Only
+    // draws whose bindings are all read-only and need nothing done per draw but the flattened
+    // user data and streamed buffers (no GDS, user clip planes, DMA, storage, SRT patches).
+    // Measured in the benchmark scene: ~63% of the eligible draws reuse their bindings.
+    static const bool disabled = std::getenv("SOTC_NO_BIND_MEMO") != nullptr;
+    if (disabled || pipeline->IsCompute() || !DrawPipe::OnStageB()) {
+        return false;
+    }
+    auto& key = bind_key;
+    key.clear();
+    const auto add = [&key](const auto& value) {
+        static_assert(sizeof(value) % sizeof(u32) == 0);
+        const auto* words = reinterpret_cast<const u32*>(&value);
+        key.insert(key.end(), words, words + sizeof(value) / sizeof(u32));
+    };
+    for (const auto& cb : cb_descs) {
+        add(cb.image_id);
+    }
+    add(db_desc.image_id);
+    add(GpuRegs().ta_bc_base);
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        if (stage->uses_dma || !stage->SrtPatches().empty()) {
+            return false;
+        }
+        for (const auto& desc : stage->buffers) {
+            if (desc.is_written) {
+                return false;
+            }
+            if (desc.IsSpecial()) {
+                // The flattened user data is redone per draw; clip planes are a null descriptor
+                // while user clip planes are off (else copied from registers per draw: not here);
+                // the BDA page table and the fault buffer are fixed buffers.
+                const auto type = desc.buffer_type;
+                if (type == Shader::BufferType::ClipPlanes) {
+                    if (GpuRegs().clipper_control.user_clip_plane_enable != 0) {
+                        return false;
+                    }
+                } else if (type != Shader::BufferType::Flatbuf &&
+                           type != Shader::BufferType::BdaPagetable &&
+                           type != Shader::BufferType::FaultBuffer) {
+                    return false;
+                }
+                continue;
+            }
+            add(desc.GetSharp(*stage));
+        }
+        for (const auto& desc : stage->images) {
+            if (desc.is_written) {
+                return false;
+            }
+            add(desc.GetSharp(*stage));
+        }
+        for (const auto& desc : stage->samplers) {
+            add(desc.GetSharp(*stage));
+        }
+    }
+    return true;
+}
+
+void Rasterizer::ReuseBindings(const Pipeline* pipeline) {
+    // The descriptor writes of the previous draw are still in set_writes, buffer_infos and
+    // image_infos (cleared only by the next full BindResources). Redo what is per draw.
+    push_data = MakeUserData(GpuRegs());
+    push_data.buf_offsets = bind_memo.buf_offsets;
+    const auto stages = pipeline->GetStages();
+    const u64 alignment = instance.StorageMinAlignment();
+    auto& stream = buffer_cache.GetStreamBuffer();
+    const size_t first_bound_buffer = bound_buffers.size();
+    bound_buffers.insert(bound_buffers.end(), bind_memo.bound_buffers.begin(),
+                         bind_memo.bound_buffers.end());
+    for (const auto& dynamic : bind_memo.dynamics) {
+        auto& info = buffer_infos[dynamic.info_index];
+        if (dynamic.address == 0) {
+            const auto flat = stages[dynamic.stage]->FlatUserData();
+            info.offset = stream.Copy(flat.data(), flat.size_bytes(), alignment);
+            continue;
+        }
+        // As BufferCache::ObtainBuffer streams it, then BindBuffers aligns it.
+        const auto [data, offset] = stream.Map(dynamic.size, instance.UniformMinAlignment());
+        memory->CopySparseMemory(dynamic.address, data, dynamic.size);
+        stream.Commit();
+        const u64 offset_aligned = Common::AlignDown(offset, alignment);
+        const u64 adjust = offset - offset_aligned;
+        push_data.AddOffset(dynamic.push_binding, adjust);
+        info.offset = offset_aligned;
+        info.range = dynamic.size + adjust;
+        bound_buffers[first_bound_buffer + dynamic.bound_index].offset = offset;
+    }
+    for (const auto image_id : bind_memo.bound_images) {
+        bound_images.push_back(image_id);
+        texture_cache.GetImage(image_id).binding.is_bound = 1u;
+        texture_cache.UseFoundImage(image_id);
+    }
 }
 
 void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
@@ -1781,6 +1969,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.FlatUserData().data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+                if (memo_recording) { // sotcport: see BindMemo
+                    bind_memo.dynamics.push_back({static_cast<u32>(buffer_infos.size() - 1), 0,
+                                                  0, memo_stage, 0, ubo_size});
+                }
                 // sotcport: dwords the GPU wrote come from the GPU (Shader::Info::SrtPatch).
                 if (const auto patches = stage.SrtPatches(); !patches.empty()) {
                     PatchFlatUserData(vk_buffer, offset, ubo_size, patches);
@@ -1848,6 +2040,14 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
                 bound_buffers.emplace_back(buffer, offset, size, src_access);
+                // sotcport: a streamed copy is made again for every draw (see BindMemo).
+                if (memo_recording && buffer == &buffer_cache.GetStreamBuffer()) {
+                    bind_memo.dynamics.push_back(
+                        {static_cast<u32>(buffer_infos.size() - 1),
+                         static_cast<u32>(bound_buffers.size() - 1 - memo_first_bound_buffer),
+                         binding.buffer, memo_stage, vsharp.base_address,
+                         static_cast<u32>(size)});
+                }
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);

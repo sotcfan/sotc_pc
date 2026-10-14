@@ -278,6 +278,23 @@ private:
     std::array<ImageBinding, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     ImageBinding db_desc;
 
+    /// sotcport: the last render target found for each color slot and for depth, kept while the
+    /// registers that describe it and the texture cache's registry stay the same (see
+    /// PrepareRenderState). Most draws keep their targets, and finding them again was ~15% of
+    /// recording an indirect draw.
+    struct TargetCacheEntry {
+        u64 generation = ~u64{0};
+        std::array<u32, 48> key{}; ///< the register words the description is built from
+        u32 key_words = 0;
+        ImageBinding binding{};
+    };
+    std::array<TargetCacheEntry, AmdGpu::NUM_COLOR_BUFFERS> cb_target_cache;
+    TargetCacheEntry db_target_cache;
+    /// Finds the image for `binding.desc` (built by `build` on a miss), or keeps the last one.
+    template <typename Build>
+    VideoCore::ImageId FindTargetImage(TargetCacheEntry& entry, std::span<const u32> key,
+                                       ImageBinding& binding, Build&& build);
+
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
 
@@ -289,6 +306,37 @@ private:
     };
     std::vector<BoundBuffer> bound_buffers;
     std::vector<VideoCore::ImageId> bound_images;
+
+    /// sotcport: the bindings of the last draw, reused when the very next packet is a draw that
+    /// binds exactly the same descriptors (see BindResources). Stage B only.
+    struct BindMemo {
+        u64 packet = ~u64{0}; ///< bind_packet of the draw that left it; valid for the next one
+        const Pipeline* pipeline = nullptr;
+        u64 texture_generation = 0;
+        std::vector<u32> key;
+        /// What has to be done again for every draw: the flattened user data (address 0) and
+        /// small buffers the buffer cache streams (copied from guest memory each time).
+        struct Dynamic {
+            u32 info_index;   ///< buffer_infos entry
+            u32 bound_index;  ///< bound_buffers entry, counted from BindResources' first one
+            u32 push_binding; ///< push_data buffer offset slot
+            u32 stage;        ///< flattened user data: index into the pipeline's stages
+            VAddr address;
+            u32 size;
+        };
+        std::vector<Dynamic> dynamics;
+        std::vector<BoundBuffer> bound_buffers;        ///< added by BindResources
+        std::vector<VideoCore::ImageId> bound_images; ///< added by BindResources
+        std::array<u8, Shader::NUM_BUFFERS> buf_offsets{};
+    };
+    BindMemo bind_memo;
+    std::vector<u32> bind_key;
+    u64 bind_packet = 0;         ///< counts stage B packets and drains (see BindMemo::packet)
+    bool memo_recording = false; ///< BindResources is recording a BindMemo
+    u32 memo_stage = 0;          ///< the stage BindBuffers is binding (for BindMemo::Dynamic)
+    size_t memo_first_bound_buffer = 0; ///< bound_buffers size when BindResources started
+    bool BuildBindKey(const Pipeline* pipeline);
+    void ReuseBindings(const Pipeline* pipeline);
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

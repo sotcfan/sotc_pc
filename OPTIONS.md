@@ -69,6 +69,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_SLOW_PENDING_OPS=1` | off | Goes back to checking pending GPU operations with a system call per draw (A/B measurements). |
 | `SOTC_NO_SHADOW_COPY=1` | on | The game copies tables of constants and descriptors with a small compute shader, and later draws read them: the command processor thread then had to wait for the GPU (~0.5 ms, up to ~1,500 times a second). The CPU computes those copies too, as the commands arrive, so nothing waits (the GPU still runs them). +15–20% frames per second in heavy scenes. This turns it off. `SOTC_VERIFY_SHADOW_COPY=1` compares every 7th copy with what the GPU wrote (slow; diagnostics). |
 | `SOTC_NO_SRT_PATCHES=1` | on | Constants a shader reads that the GPU itself computed are copied on the GPU, right before the draw, instead of being read back on the CPU. This turns it off. |
+| `SOTC_NO_BIND_MEMO=1` | on | Most draws bind exactly the buffers, textures and samplers of the draw before them: their bindings are reused and only the per-draw constants are redone. This turns it off. |
+| `SOTC_NO_TARGET_CACHE=1` | on | Render targets are looked up again only when their registers change. This turns it off. |
 
 ## Diagnostics
 
