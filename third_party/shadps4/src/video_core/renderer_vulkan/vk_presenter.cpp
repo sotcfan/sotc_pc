@@ -4,6 +4,7 @@
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
+#include "common/thread.h"
 #include "common/path_util.h"
 #include "common/singleton.h"
 #include "core/debug_state.h"
@@ -22,6 +23,9 @@
 #include <cctype>
 #include <chrono>
 #include <thread>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
 #include <cmath>
 #include <csetjmp>
 #include <cstring>
@@ -416,23 +420,22 @@ bool WaitForScreenshots(std::chrono::milliseconds timeout) {
     return true;
 }
 
-static void SavePendingScreenshot(const ScreenshotReadback& readback) {
-    if (readback.paths.empty()) {
-        return;
-    }
-
+// sotcport: a screenshot converted to RGBA8, waiting for an encoder thread.
+struct ScreenshotJob {
+    std::vector<std::filesystem::path> paths;
     std::vector<u8> rgba;
-    if (!ConvertReadbackToRgba8(readback, rgba)) {
-        return;
-    }
+    u32 width{};
+    u32 height{};
+};
 
+static void WriteScreenshotFiles(const ScreenshotJob& job) {
     // sotcport: written under a temporary name and renamed when complete, so a screenshot cut
     // short (the game closed while it was being written) never leaves an empty or partial PNG
     // under its final name (an empty one was left on 2026-10-14).
-    const auto& primary_path = readback.paths.front();
+    const auto& primary_path = job.paths.front();
     auto partial_path = primary_path;
     partial_path += ".part";
-    if (!WritePng(partial_path, rgba, readback.width, readback.height)) {
+    if (!WritePng(partial_path, job.rgba, job.width, job.height)) {
         LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", primary_path.string());
         return;
     }
@@ -443,39 +446,72 @@ static void SavePendingScreenshot(const ScreenshotReadback& readback) {
                   rename_error.message());
         return;
     }
-
     LOG_INFO(Render_Vulkan, "Saved screenshot: {}", primary_path.string());
 
-    std::ifstream file(primary_path, std::ios::binary);
-    std::vector<u8> imgdata;
-    if (file) {
-        imgdata =
-            std::vector<u8>(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    }
-    // sotcport: no on-screen notifications.
-
-    for (size_t i = 1; i < readback.paths.size(); ++i) {
-        const auto& path = readback.paths[i];
+    // sotcport: no on-screen notifications (shadPS4 read each file back for them).
+    for (size_t i = 1; i < job.paths.size(); ++i) {
+        const auto& path = job.paths[i];
         std::error_code ec{};
         std::filesystem::copy_file(primary_path, path, std::filesystem::copy_options::none, ec);
         if (ec) {
             // Fallback for platforms/filesystems where copy_file can fail for transient
             // reasons.
-            if (!WritePng(path, rgba, readback.width, readback.height)) {
+            if (!WritePng(path, job.rgba, job.width, job.height)) {
                 LOG_ERROR(Render_Vulkan, "Failed saving screenshot to {}", path.string());
                 continue;
             }
         }
-
         LOG_INFO(Render_Vulkan, "Saved screenshot: {}", path.string());
-        std::ifstream file(path, std::ios::binary);
-        std::vector<u8> imgdata;
-        if (file) {
-            imgdata = std::vector<u8>(std::istreambuf_iterator<char>(file),
-                                      std::istreambuf_iterator<char>());
-        }
-    // sotcport: no on-screen notifications.
     }
+}
+
+// sotcport: PNG encoding (~0.2 s for a 1080p frame) ran on the thread that pops the draw
+// scheduler's deferred operations, one screenshot after another: holding F9 stalled the GPU
+// work and queued seconds of encoding, which the exit then had to wait for (the window stayed
+// up ~4 s after being closed). The conversion stays there (it reads the readback buffer, which
+// is freed with the operation); the encoding runs on a few threads of its own.
+static void EncodeScreenshot(ScreenshotJob job) {
+    static std::mutex mutex;
+    static std::condition_variable cv;
+    static std::deque<ScreenshotJob> jobs;
+    static std::once_flag started;
+    std::call_once(started, [] {
+        constexpr u32 NumEncoders = 4;
+        for (u32 i = 0; i < NumEncoders; ++i) {
+            std::thread([] {
+                Common::SetCurrentThreadName("sotc:Screenshot");
+                for (;;) {
+                    ScreenshotJob next;
+                    {
+                        std::unique_lock lock{mutex};
+                        cv.wait(lock, [] { return !jobs.empty(); });
+                        next = std::move(jobs.front());
+                        jobs.pop_front();
+                    }
+                    WriteScreenshotFiles(next);
+                    g_screenshots_pending.fetch_sub(1, std::memory_order_release);
+                }
+            }).detach();
+        }
+    });
+    {
+        std::scoped_lock lock{mutex};
+        jobs.push_back(std::move(job));
+    }
+    cv.notify_one();
+}
+
+// Returns whether the screenshot was handed to an encoder thread (which then counts it done).
+static bool SavePendingScreenshot(const ScreenshotReadback& readback) {
+    if (readback.paths.empty()) {
+        return false;
+    }
+    ScreenshotJob job{readback.paths, {}, readback.width, readback.height};
+    if (!ConvertReadbackToRgba8(readback, job.rgba)) {
+        return false;
+    }
+    EncodeScreenshot(std::move(job));
+    return true;
 }
 
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
@@ -762,8 +798,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         g_screenshots_pending.fetch_add(1, std::memory_order_relaxed); // sotcport
         draw_scheduler.DeferPriorityOperation(
             [deferred_screenshot = std::move(pending_screenshot)]() {
-                SavePendingScreenshot(deferred_screenshot.value());
-                g_screenshots_pending.fetch_sub(1, std::memory_order_release); // sotcport
+                if (!SavePendingScreenshot(deferred_screenshot.value())) {
+                    g_screenshots_pending.fetch_sub(1, std::memory_order_release); // sotcport
+                }
             });
     }
 
