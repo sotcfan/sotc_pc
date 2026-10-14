@@ -38,6 +38,10 @@ void SetFaultSite(uint64_t game_address);
 void NoteReadback(uint64_t address, uint64_t size, bool is_write);
 // One SRT walker run: guest reads it logged, and whether any needed a readback.
 void NoteSrtReads(uint64_t reads, bool fetched);
+// GPU-written dwords of a walk left to the GPU (Shader::Info::srt_patches).
+void NoteSrtPatches(uint64_t patches);
+// A fill/copy dispatch computed on the CPU too (Rasterizer::ShadowCopyShader).
+void NoteShadowCopy(uint64_t bytes);
 // One SRT walker readback of 8 bytes at `address`: whether the downloaded data differed.
 void NoteSrtReadback(uint64_t address, bool changed);
 // A WAIT_REG_MEM that drained stage B: polled address, whether it was met right after.

@@ -4,6 +4,7 @@
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "diag/memory_types.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -47,48 +48,92 @@ namespace {
 VideoCore::BufferCache* g_srt_buffer_cache = nullptr;
 Rasterizer* g_srt_rasterizer = nullptr; // sotcport: two-stage draw pipeline
 
-bool CheckSrtReads(const u64* begin, const u64* end) {
+bool CheckSrtReads(Shader::Info& info, const u64* begin, const u64* end) {
     const u64 mirror = hle::kernel::GuestMirrorOffset();
     bool fetched = false;
+    // sotcport: what each read is (Shader::SrtReadPointer). Data reads the CPU never looks at
+    // (no pointer, no descriptor, nothing the walker computes offsets from) are left to the GPU
+    // when the GPU wrote them or will write them in a packet still queued for stage B: copied
+    // into the flattened user data on the GPU, in GPU order, right before the shader runs
+    // (info.srt_patches, BindBuffers). The rest is fetched as before. Without a map that matches
+    // the log (it always should), every read counts as one the CPU needs.
+    // SOTC_SRT_PATCHES=1 turns it on (off by default: measured slower so far, see
+    // ESCOPO_ATUAL.md, H1).
+    static const bool no_patches = std::getenv("SOTC_SRT_PATCHES") == nullptr;
+    const std::span<const u16> map = info.srt_read_map;
+    const bool use_map = !no_patches && map.size() == static_cast<size_t>(end - begin);
     // Reads come in runs from the same table: decide per 4 KiB page whether the GPU wrote any of
-    // it (cheap) and only then look at the exact bytes.
+    // it, or may in a queued packet (cheap), and only then look at the exact bytes.
     constexpr u64 PageBits = 12;
+    constexpr u64 PageSize = u64{1} << PageBits;
     u64 last_page = ~u64{0};
+    bool page_pending = false;
     bool page_modified = false;
     for (const u64* read = begin; read != end; ++read) {
         const VAddr address = *read - mirror;
+        diag::NoteMemoryAccess(diag::MemAccess::SrtRead, address, 8); // sotcport (SOTC_MEMORY_TYPES)
         if (address >> PageBits != last_page) {
             last_page = address >> PageBits;
-            // sotcport (two-stage draw pipeline): work still queued for stage B may write here
-            // (a shader, or a fence the game uses to patch a table): stage B runs dry first, and
-            // the walk is done again (fetched), since what it read may have been stale. After
-            // that no packet in flight writes this page, so stage B can only take ranges out of
-            // the exact set below (downloads), never add to it, and the check runs without
-            // waiting for it (the set has its own lock); only an actual download drains.
-            if (g_srt_rasterizer->PendingWriteOverlaps(last_page << PageBits, u64{1} << PageBits)) {
-                g_srt_rasterizer->DrainDrawPipe(DrawPipe::ReasonSrtPending);
-                fetched = true;
+            page_pending = g_srt_rasterizer->PendingWriteOverlaps(last_page << PageBits, PageSize);
+            page_modified = g_srt_buffer_cache->IsRegionGpuModified(last_page << PageBits, PageSize);
+        }
+        if (!page_pending && !page_modified) {
+            continue;
+        }
+        const u16 entry = use_map ? map[read - begin] : Shader::SrtReadPointer;
+        const u32 dst_dw = entry & Shader::SrtReadDwordMask;
+        if (entry != Shader::SrtReadPointer && !(entry & Shader::SrtReadCpuNeeded) &&
+            !info.IsDescriptorDword(dst_dw)) {
+            if ((page_pending && g_srt_rasterizer->PendingWriteOverlaps(address, sizeof(u32))) ||
+                (page_modified && g_srt_buffer_cache->AreBytesGpuModified(address, sizeof(u32)))) {
+                info.srt_patches.push_back({address, dst_dw, 0});
             }
-            page_modified =
-                g_srt_buffer_cache->IsRegionGpuModified(last_page << PageBits, u64{1} << PageBits);
+            continue;
+        }
+        // The CPU needs these bytes. sotcport (two-stage draw pipeline): work still queued for
+        // stage B may write here (a shader, or a fence the game uses to patch a table): stage B
+        // runs dry first, and the walk is done again (fetched), since what it read may have been
+        // stale. After that no packet in flight writes this page, so stage B can only take
+        // ranges out of the exact set below (downloads), never add to it, and the check runs
+        // without waiting for it (the set has its own lock); only an actual download drains.
+        if (page_pending) {
+            g_srt_rasterizer->DrainDrawPipe(DrawPipe::ReasonSrtPending);
+            fetched = true;
+            page_pending = false;
+            page_modified = g_srt_buffer_cache->IsRegionGpuModified(last_page << PageBits, PageSize);
         }
         // SOTC_SRT_FETCH_PAGES=1: fetch the whole page whenever the GPU wrote any of it
         // (diagnostics: rules out reads the byte check would miss).
         static const bool whole_pages = std::getenv("SOTC_SRT_FETCH_PAGES") != nullptr;
         if (page_modified && whole_pages) {
             g_srt_rasterizer->DrainDrawPipe(DrawPipe::ReasonSrtGpuModified);
-            g_srt_buffer_cache->ReadMemory(last_page << PageBits, u64{1} << PageBits, false, true);
+            g_srt_buffer_cache->ReadMemory(last_page << PageBits, PageSize, false, true);
             page_modified = false;
             fetched = true;
         } else if (page_modified && g_srt_buffer_cache->AreBytesGpuModified(address, 8)) {
+            // sotcport (SOTC_TRACE_SRT_READBACKS=1, diagnostics): which walks still wait for the
+            // GPU, sampled over the whole session.
+            static const bool trace = std::getenv("SOTC_TRACE_SRT_READBACKS") != nullptr;
+            static u32 traced = 0;
+            const u64 before = trace ? *reinterpret_cast<const u64*>(*read) : 0;
             g_srt_rasterizer->DrainDrawPipe(DrawPipe::ReasonSrtGpuModified);
             perf::SetFaultSite(1); // sotcport TEMP: "0x1" marks SRT walker readbacks
             g_srt_buffer_cache->ReadMemory(address, 8, false, true);
             perf::SetFaultSite(0);
             fetched = true;
+            if (trace && (traced++ % 97) == 0) { // a sample over the whole session
+                LOG_INFO(Render,
+                         "SRT readback: shader {:#x} read #{} of {} ({}) at {:#x}: {:#x} -> {:#x}",
+                         Shader::SrtWalkProgramHash, read - begin, end - begin,
+                         entry == Shader::SrtReadPointer   ? "pointer"
+                         : entry & Shader::SrtReadCpuNeeded ? "offset"
+                                                            : "descriptor",
+                         address, before, *reinterpret_cast<const u64*>(*read));
+            }
         }
     }
     perf::NoteSrtReads(end - begin, fetched); // sotcport TEMP
+    perf::NoteSrtPatches(info.srt_patches.size()); // sotcport TEMP
     return fetched;
 }
 
@@ -552,11 +597,149 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
+    const bool shadowed = ShadowCopyShader(pipeline); // sotcport
     if (UseDrawPipe()) {
+        next_packet_shadowed = shadowed;
         PostPacket(PacketKind::Dispatch, pipeline, false, 0, nullptr);
-        return;
+        next_packet_shadowed = false;
+    } else {
+        shadow_dispatch = shadowed;
+        DispatchRecord(pipeline);
+        shadow_dispatch = false;
     }
-    DispatchRecord(pipeline);
+    if (shadowed && shadow_verify_address) {
+        VerifyShadowCopy();
+    }
+}
+
+void Rasterizer::VerifyShadowCopy() {
+    // sotcport (SOTC_VERIFY_SHADOW_COPY=1, diagnostics): right after a sampled shadowed
+    // dispatch, before anything later can write there, compares what the GPU wrote with what
+    // the CPU computed (stage B records it, the GPU runs it, the arena is read back).
+    static u32 verified = 0, mismatches = 0;
+    DrainDrawPipe(DrawPipe::ReasonSrtPending);
+    std::vector<u32> gpu(shadow_verify_expected.size());
+    if (buffer_cache.PeekGpuMemory(shadow_verify_address, gpu.size() * 4,
+                                   reinterpret_cast<u8*>(gpu.data()))) {
+        ++verified;
+        if (gpu != shadow_verify_expected) {
+            ++mismatches;
+            const auto first =
+                std::ranges::mismatch(gpu, shadow_verify_expected).in1 - gpu.begin();
+            LOG_ERROR(Render, "shadow copy at {:#x}: GPU {:#x} / CPU {:#x} at dword {} of {}",
+                      shadow_verify_address, gpu[first], shadow_verify_expected[first], first,
+                      gpu.size());
+        }
+        if (verified % 100 == 0) {
+            LOG_INFO(Render, "shadow copies verified: {}, {} differed", verified, mismatches);
+        }
+    }
+    shadow_verify_address = 0;
+}
+
+// sotcport: the game's buffer fill/copy helper, a compute shader with three formatted buffers:
+// a control block {count, period}, a source and a destination, one dword per thread:
+//     for i < min(count, destination records): dst[i] = src[i % period]   (0 past the source)
+// The game uses it to copy tables of constants and descriptors that the CPU prepared, and later
+// draws read those tables through their SRTs. Done on the GPU only, every such read had to wait
+// for the GPU (a readback: drain, submit, wait, ~0.5 ms; ~1,000 per second, almost all of the
+// SRT walker's readbacks in the benchmark scene). So the CPU computes the same bytes as the
+// packet is processed, in packet order, and writes them to guest memory: the walker reads
+// current data. The GPU still runs the copy (its copy of memory gets the same bytes in GPU order,
+// for work recorded before and after), without marking them GPU-modified.
+// Only when the inputs are current in CPU memory (nothing GPU-written or still queued for stage
+// B), the formats copy bits unchanged, and the dispatch has the shape the code relies on.
+// SOTC_SHADOW_COPY=1 turns it on (experimental until verified in play).
+bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
+    constexpr u64 FillCopyShaderHash = 0x50784801;
+    static const bool disabled = std::getenv("SOTC_SHADOW_COPY") == nullptr;
+    const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (disabled || cs.pgm_hash != FillCopyShaderHash) {
+        return false;
+    }
+    // SOTC_VERIFY_SHADOW_COPY=1 (diagnostics): every 7th one is compared with what the GPU
+    // writes (VerifyShadowCopy).
+    static const bool verify = std::getenv("SOTC_VERIFY_SHADOW_COPY") != nullptr;
+    static u32 verify_counter = 0;
+    std::array<const Shader::BufferResource*, 3> descs{};
+    u32 found = 0;
+    for (const auto& desc : cs.buffers) {
+        if (!desc.IsSpecial()) {
+            if (found == descs.size()) {
+                return false;
+            }
+            descs[found++] = &desc;
+        }
+    }
+    if (found != descs.size() || descs[0]->is_written || descs[1]->is_written ||
+        !descs[2]->is_written) {
+        return false;
+    }
+    const AmdGpu::Buffer ctl = descs[0]->GetSharp(cs);
+    const AmdGpu::Buffer src = descs[1]->GetSharp(cs);
+    const AmdGpu::Buffer dst = descs[2]->GetSharp(cs);
+    const auto copies_bits = [](const AmdGpu::Buffer& buffer) {
+        const auto number = buffer.GetNumberFmt();
+        return buffer.GetDataFmt() == AmdGpu::DataFormat::Format32 && buffer.GetStride() == 4 &&
+               (number == AmdGpu::NumberFormat::Uint || number == AmdGpu::NumberFormat::Sint ||
+                number == AmdGpu::NumberFormat::Float) &&
+               AmdGpu::CompSwizzle(buffer.dst_sel_x) == AmdGpu::CompSwizzle::Red;
+    };
+    const auto& program = CsRegs();
+    if (!copies_bits(src) || !copies_bits(dst) || ctl.GetSize() < 8 || program.dim_y != 1 ||
+        program.dim_z != 1 || program.start_x != 0 || program.num_thread_x.full != 64 ||
+        program.num_thread_y.full != 1 || program.num_thread_z.full != 1) {
+        return false;
+    }
+    std::array<u32, 2> control{};
+    const VAddr src_address = src.base_address;
+    const VAddr dst_address = dst.base_address;
+    const u64 src_bytes = u64{src.num_records} * 4;
+    // Inputs current in CPU memory: nothing the GPU wrote, nothing queued that writes them.
+    const auto current = [&](VAddr address, u64 size) {
+        return size == 0 || (hle::kernel::ClampToMapped(address, size) == size &&
+                             !PendingWriteOverlaps(address, size) &&
+                             !buffer_cache.AreBytesGpuModified(address, size));
+    };
+    if (!current(ctl.base_address, sizeof(control)) || !current(src_address, src_bytes)) {
+        return false;
+    }
+    memory->CopySparseMemory(ctl.base_address, reinterpret_cast<u8*>(control.data()),
+                             sizeof(control));
+    const u64 threads = u64{program.dim_x} * 64;
+    const u64 count = std::min<u64>({control[0], dst.num_records, threads});
+    const u32 period = control[1];
+    const u64 dst_bytes = count * 4;
+    // Only small copies: the tables the SRT walker reads are a few KiB; big fills (clearing
+    // buffers, up to hundreds of KiB) would only cost CPU time here.
+    constexpr u64 MaxShadowBytes = 16_KB;
+    if (count == 0 || period == 0 || dst_bytes > MaxShadowBytes ||
+        hle::kernel::ClampToMapped(dst_address, dst_bytes) != dst_bytes ||
+        (dst_address < src_address + src_bytes && src_address < dst_address + dst_bytes)) {
+        return false;
+    }
+    // Writes still queued for stage B to the destination come first in GPU order: let stage B
+    // record them (they mark what they write), then those marks are dropped for the bytes this
+    // copy overwrites.
+    if (PendingWriteOverlaps(dst_address, dst_bytes)) {
+        DrainDrawPipe(DrawPipe::ReasonSrtPending);
+    }
+    buffer_cache.ForgetGpuWrites(dst_address, dst_bytes);
+    static std::vector<u32> source, result;
+    source.resize(src.num_records);
+    memory->CopySparseMemory(src_address, reinterpret_cast<u8*>(source.data()), src_bytes);
+    result.resize(count);
+    for (u64 i = 0; i < count; ++i) {
+        const u64 index = i % period;
+        result[i] = index < source.size() ? source[index] : 0;
+    }
+    memory->TryWriteBacking(reinterpret_cast<void*>(dst_address), result.data(), dst_bytes);
+    perf::NoteShadowCopy(dst_bytes); // sotcport TEMP
+    if (verify && (verify_counter++ % 7) == 0) {
+        shadow_verify_address = dst_address;
+        shadow_verify_expected.assign(result.begin(), result.end());
+    }
+    return true;
 }
 
 void Rasterizer::MaybeFlushEarly() {
@@ -686,6 +869,7 @@ struct PacketHeader {
     u8 regs_reset;  ///< ClearState since the last packet: defaults before the blocks
     u8 full_regs;   ///< the whole register file follows the header (first packet)
     u8 verify;      ///< the live register file is appended for comparison
+    u8 shadowed;    ///< sotcport: a dispatch whose writes the CPU computed (ShadowCopyShader)
     const void* pipeline;
     u32 index_offset;
     u16 num_blocks;
@@ -706,6 +890,8 @@ struct PacketStage {
     VAddr pgm_base;
     u32 ud_size;
     u32 flat_size;
+    u32 num_patches; ///< sotcport: Shader::Info::SrtPatch entries after the user data
+    u32 pad;
 };
 
 constexpr u32 AlignPacket(u32 size) {
@@ -745,7 +931,8 @@ void Rasterizer::NotePendingWrites(const Pipeline* pipeline) {
             continue;
         }
         for (const auto& desc : stage->buffers) {
-            if (!desc.is_written || desc.IsSpecial()) {
+            // sotcport: what a shadowed dispatch writes is already in CPU memory.
+            if (!desc.is_written || desc.IsSpecial() || next_packet_shadowed) {
                 continue;
             }
             const auto vsharp = desc.GetSharp(*stage);
@@ -835,7 +1022,8 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
             ++num_stages;
             size += sizeof(PacketStage) +
                     AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
-                                sizeof(u32));
+                                sizeof(u32)) +
+                    u32(stage->srt_patches.size() * sizeof(Shader::Info::SrtPatch));
         }
     }
     const bool dispatch = kind == PacketKind::Dispatch || kind == PacketKind::DispatchIndirect;
@@ -862,6 +1050,7 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
     header.regs_reset = !full && dirty.reset;
     header.full_regs = full;
     header.verify = verify;
+    header.shadowed = next_packet_shadowed;
     header.pipeline = pipeline;
     header.index_offset = index_offset;
     header.num_blocks = static_cast<u16>(num_blocks);
@@ -886,14 +1075,21 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
             continue;
         }
         auto& stage_header = *reinterpret_cast<PacketStage*>(out);
-        stage_header = {stage, stage->pgm_base, static_cast<u32>(stage->user_data.size()),
-                        static_cast<u32>(stage->flattened_ud_buf.size())};
+        stage_header = {stage,
+                        stage->pgm_base,
+                        static_cast<u32>(stage->user_data.size()),
+                        static_cast<u32>(stage->flattened_ud_buf.size()),
+                        static_cast<u32>(stage->srt_patches.size()),
+                        0};
         out += sizeof(PacketStage);
         std::memcpy(out, stage->user_data.data(), stage->user_data.size_bytes());
         std::memcpy(out + stage->user_data.size_bytes(), stage->flattened_ud_buf.data(),
                     stage->flattened_ud_buf.size() * sizeof(u32));
         out += AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
                            sizeof(u32));
+        const u32 patch_bytes = u32(stage->srt_patches.size() * sizeof(Shader::Info::SrtPatch));
+        std::memcpy(out, stage->srt_patches.data(), patch_bytes);
+        out += patch_bytes;
     }
     if (dispatch) {
         std::memcpy(out, &liverpool->GetCsRegs(), sizeof(AmdGpu::ComputeProgram));
@@ -1065,10 +1261,14 @@ void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
         const auto& stage = *reinterpret_cast<const PacketStage*>(in);
         in += sizeof(PacketStage);
         const auto* words = reinterpret_cast<const u32*>(in);
-        Shader::Info::ud_snapshots[i] = {stage.info, {words, stage.ud_size},
-                                         {words + stage.ud_size, stage.flat_size},
-                                         stage.pgm_base};
         in += AlignPacket((stage.ud_size + stage.flat_size) * sizeof(u32));
+        const auto* patches = reinterpret_cast<const Shader::Info::SrtPatch*>(in);
+        in += stage.num_patches * sizeof(Shader::Info::SrtPatch);
+        Shader::Info::ud_snapshots[i] = {stage.info,
+                                         {words, stage.ud_size},
+                                         {words + stage.ud_size, stage.flat_size},
+                                         stage.pgm_base,
+                                         {patches, stage.num_patches}};
     }
     Shader::Info::num_ud_snapshots = header.num_stages;
     const auto kind = static_cast<PacketKind>(header.kind);
@@ -1124,7 +1324,9 @@ void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
                                 header.is_indexed, *indirect);
         break;
     case PacketKind::Dispatch:
+        self.shadow_dispatch = header.shadowed;
         self.DispatchRecord(static_cast<const ComputePipeline*>(header.pipeline));
+        self.shadow_dispatch = false;
         break;
     case PacketKind::DispatchIndirect:
         self.DispatchIndirectRecord(static_cast<const ComputePipeline*>(header.pipeline),
@@ -1332,6 +1534,35 @@ void Rasterizer::BindIndexBuffer(const IndexBinding& index) {
     });
 }
 
+void Rasterizer::PatchFlatUserData(VideoCore::StreamBuffer& flatbuf, u64 offset, u32 size,
+                                   std::span<const Shader::Info::SrtPatch> patches) {
+    // sotcport: the walker left these dwords to the GPU (CheckSrtReads): the GPU wrote them, or
+    // will in work recorded before this draw. Copy each from the GPU's copy of guest memory into
+    // the flattened user data the CPU just wrote, in GPU order: as the console's shader would
+    // read them itself. Copies cannot run inside rendering (Runtime::CopyBuffer ends it).
+    boost::container::small_vector<vk::BufferCopy, 8> copies;
+    const VideoCore::Buffer* source = nullptr;
+    const auto copy_pending = [&] {
+        if (!copies.empty()) {
+            runtime.CopyBuffer(source, &flatbuf, copies);
+            copies.clear();
+        }
+    };
+    for (const auto& patch : patches) {
+        const auto [buffer, buffer_offset] =
+            buffer_cache.ObtainBuffer(patch.address, sizeof(u32), false);
+        if (buffer != source) {
+            copy_pending();
+            source = buffer;
+        }
+        copies.push_back({buffer_offset, offset + u64{patch.dst_dw} * sizeof(u32), sizeof(u32)});
+    }
+    copy_pending();
+    // The shader reads what the copies wrote.
+    needs_barrier |= runtime.IsBufferAccessed(&flatbuf, offset, size);
+    bound_buffers.emplace_back(&flatbuf, offset, size, vk::AccessFlagBits2::eShaderRead);
+}
+
 void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
@@ -1527,6 +1758,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.FlatUserData().data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+                // sotcport: dwords the GPU wrote come from the GPU (Shader::Info::SrtPatch).
+                if (const auto patches = stage.SrtPatches(); !patches.empty()) {
+                    PatchFlatUserData(vk_buffer, offset, ubo_size, patches);
+                }
             } else if (desc.buffer_type == Shader::BufferType::ClipPlanes) {
                 // Permutations compiled without enabled planes never read the buffer, so the
                 // declared binding is satisfied with a null descriptor instead of a copy.
@@ -1578,8 +1813,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                                  vsharp.GetSize(), size, stage.pgm_hash);
                     }
                 }
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                const auto [buffer, offset] =
+                    buffer_cache.ObtainBuffer(vsharp.base_address, size, desc.is_written,
+                                              desc.is_formatted, shadow_dispatch);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -1664,6 +1900,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
+            diag::NoteMemoryAccess(diag::MemAccess::ImageBind, image->info.guest_address,
+                                   image->info.guest_size); // sotcport (SOTC_MEMORY_TYPES)
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.

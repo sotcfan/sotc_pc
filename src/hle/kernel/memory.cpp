@@ -31,6 +31,7 @@
 #include "common/platform.h"
 #include "common/types.h"
 #include "hle/kernel/errno.h"
+#include "diag/memory_types.h"
 #include "hle/kernel/gpu_memory.h"
 #include "hle/registry.h"
 
@@ -620,6 +621,7 @@ private:
             return host_memory::MapReserved(start, length);
         case VmaType::Direct:
         case VmaType::Flexible:
+            diag::NoteGameMapping(start, length, physical, type == VmaType::Flexible);
             return host_memory::MapPhysical(start, length, physical, HostProtection(prot));
         }
         return false;

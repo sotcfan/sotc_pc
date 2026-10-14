@@ -30,6 +30,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "perf_temp.h" // sotcport TEMP
 #include "hle/kernel/gpu_memory.h"
+#include "diag/memory_types.h"
 
 namespace AmdGpu {
 
@@ -221,6 +222,8 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::SignalEopFence(const PM4CmdEventWriteEop& packet) {
+    diag::NoteMemoryAccess(diag::MemAccess::Label, reinterpret_cast<u64>(packet.Address<u8>()),
+                           sizeof(u64)); // sotcport (SOTC_MEMORY_TYPES)
     packet.SignalFence(
         [](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
@@ -230,6 +233,8 @@ void Liverpool::SignalEopFence(const PM4CmdEventWriteEop& packet) {
 }
 
 void Liverpool::SignalReleaseMem(const PM4CmdReleaseMem& packet, u32 pipe_id) {
+    diag::NoteMemoryAccess(diag::MemAccess::Label, packet.Address<VAddr>(),
+                           sizeof(u64)); // sotcport (SOTC_MEMORY_TYPES)
     packet.SignalFence(
         [pipe_id] {
             Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
@@ -434,6 +439,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::IndirectBufferConst: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            diag::NoteMemoryAccess(diag::MemAccess::IndirectCommands, // sotcport
+                                   reinterpret_cast<u64>(indirect_buffer->Address<const u32>()),
+                                   u64{indirect_buffer->ib_size} * sizeof(u32));
             auto task =
                 ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
             RESUME_CE(task);
@@ -1021,6 +1029,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
                 const u32 data_size = (header->type3.count.Value() - 2) * 4;
                 u64* address = write_data->Address<u64*>();
+                diag::NoteMemoryAccess(diag::MemAccess::Label, reinterpret_cast<u64>(address),
+                                       data_size); // sotcport (SOTC_MEMORY_TYPES)
                 if (!write_data->wr_one_addr.Value()) {
                     if (rasterizer) {
                         rasterizer->OnFence();
@@ -1087,6 +1097,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+                diag::NoteMemoryAccess(diag::MemAccess::IndirectCommands, // sotcport
+                                       reinterpret_cast<u64>(indirect_buffer->Address<const u32>()),
+                                       u64{indirect_buffer->ib_size} * sizeof(u32));
                 auto task = ProcessGraphics(
                     {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
                 RESUME_GFX(task);
@@ -1234,6 +1247,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::IndirectBuffer: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            diag::NoteMemoryAccess(diag::MemAccess::IndirectCommands, // sotcport
+                                   reinterpret_cast<u64>(indirect_buffer->Address<const u32>()),
+                                   u64{indirect_buffer->ib_size} * sizeof(u32));
             // sotcport: a fence or shader queued for stage B may still write into it.
             const auto ib_address = reinterpret_cast<VAddr>(indirect_buffer->Address<const u32>());
             if (rasterizer && rasterizer->PendingWriteOverlaps(
@@ -1383,6 +1399,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
             ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
+            diag::NoteMemoryAccess(diag::MemAccess::Label, write_data->Address<u64>(),
+                                   data_size); // sotcport (SOTC_MEMORY_TYPES)
             if (!write_data->wr_one_addr.Value()) {
                 if (rasterizer) {
                     rasterizer->OnFence();
@@ -1489,6 +1507,13 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     auto& queue = mapped_queues[GfxQueueId];
+    // sotcport (SOTC_MEMORY_TYPES): where the command buffers live.
+    diag::NoteMemoryAccess(diag::MemAccess::GfxCommands, reinterpret_cast<u64>(dcb.data()),
+                           dcb.size_bytes());
+    if (!ccb.empty()) {
+        diag::NoteMemoryAccess(diag::MemAccess::CeCommands, reinterpret_cast<u64>(ccb.data()),
+                               ccb.size_bytes());
+    }
 
     if (EmulatorSettings.IsCopyGpuBuffers()) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);
@@ -1508,6 +1533,8 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     ASSERT_MSG(gnm_vqid > 0 && gnm_vqid < NumTotalQueues, "Invalid virtual ASC queue index");
     auto& queue = mapped_queues[gnm_vqid];
+    diag::NoteMemoryAccess(diag::MemAccess::ComputeCommands, reinterpret_cast<u64>(acb.data()),
+                           acb.size_bytes()); // sotcport (SOTC_MEMORY_TYPES)
 
     const auto vqid = gnm_vqid - 1;
     const auto& task = ProcessCompute(acb, vqid);

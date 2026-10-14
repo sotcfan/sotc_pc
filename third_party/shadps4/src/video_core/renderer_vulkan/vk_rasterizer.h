@@ -172,6 +172,15 @@ private:
     void DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                             const IndirectDraw& indirect);
     void DispatchRecord(const ComputePipeline* pipeline);
+    /// sotcport: computes on the CPU, as the packet is processed, what the game's buffer
+    /// fill/copy compute shader will write (see the .cpp). True when it did: the dispatch still
+    /// runs on the GPU, with its destination not tracked as GPU-modified (shadow_dispatch).
+    bool ShadowCopyShader(const ComputePipeline* pipeline);
+    void VerifyShadowCopy();
+    bool shadow_dispatch = false; ///< the dispatch being recorded was shadowed on the CPU
+    VAddr shadow_verify_address = 0;          ///< SOTC_VERIFY_SHADOW_COPY: copy to compare
+    std::vector<u32> shadow_verify_expected;  ///< what the CPU computed for it
+    bool next_packet_shadowed = false; ///< stage A: the packet about to be posted was
     void MaybeFlushEarly();
     u32 work_since_flush = 0; ///< draws and dispatches recorded since the last early flush
     void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr address, u32 offset,
@@ -205,6 +214,10 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
+    /// sotcport: copies the GPU-written dwords of a flattened user data block (see
+    /// Shader::Info::SrtPatch) on the GPU.
+    void PatchFlatUserData(VideoCore::StreamBuffer& flatbuf, u64 offset, u32 size,
+                           std::span<const Shader::Info::SrtPatch> patches);
     bool BindResources(const Pipeline* pipeline);
 
     struct IndexBinding {

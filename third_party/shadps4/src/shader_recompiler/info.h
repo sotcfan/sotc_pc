@@ -103,6 +103,19 @@ struct Info : InfoPersistent {
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
+    /// sotcport: what each entry of the SRT walker's read log is (see SrtReadPointer).
+    std::vector<u16> srt_read_map;
+
+    /// sotcport: a dword of flattened user data that the GPU wrote: instead of waiting for the GPU
+    /// to read it back, it is copied on the GPU from `address` into the flattened user data
+    /// right before the shader runs (as the console's shader would read it, in GPU order).
+    struct SrtPatch {
+        VAddr address;
+        u32 dst_dw;
+        u32 pad;
+    };
+    /// sotcport: the patches of the last walk (filled by SrtReadCheck).
+    std::vector<SrtPatch> srt_patches;
 
     AttributeFlags loads{};
     AttributeFlags stores{};
@@ -151,6 +164,7 @@ struct Info : InfoPersistent {
         std::span<const u32> user_data;
         std::span<const u32> flat;
         VAddr pgm_base;
+        std::span<const SrtPatch> patches;
     };
     static constexpr u32 MaxUdSnapshots = 8;
     static inline thread_local std::array<UdSnapshot, MaxUdSnapshots> ud_snapshots{};
@@ -170,6 +184,45 @@ struct Info : InfoPersistent {
     std::span<const u32> FlatUserData() const noexcept {
         const auto* snapshot = num_ud_snapshots ? Snapshot() : nullptr;
         return snapshot ? snapshot->flat : std::span<const u32>{flattened_ud_buf};
+    }
+    std::span<const SrtPatch> SrtPatches() const noexcept {
+        const auto* snapshot = num_ud_snapshots ? Snapshot() : nullptr;
+        return snapshot ? snapshot->patches : std::span<const SrtPatch>{srt_patches};
+    }
+    /// sotcport: whether the CPU reads flattened dword `dw` itself (it is part of a descriptor).
+    bool IsDescriptorDword(u32 dw) const noexcept {
+        const auto in_fetch = [dw](const auto& fetch) {
+            if (fetch.summary == std::remove_cvref_t<decltype(fetch)>::Summary::SingleLoad) {
+                return dw >= fetch.offsets[0] && dw < fetch.offsets[0] + fetch.N;
+            }
+            for (u32 i = 0; i < fetch.N; ++i) {
+                if (((fetch.load_mask >> i) & 1) && fetch.offsets[i] == dw) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto& buffer : buffers) {
+            if (in_fetch(buffer.sharp_fetch)) {
+                return true;
+            }
+        }
+        for (const auto& image : images) {
+            if (in_fetch(image.sharp_fetch)) {
+                return true;
+            }
+        }
+        for (const auto& sampler : samplers) {
+            if (in_fetch(sampler.sharp_fetch) || sampler.post_op_tsharp_dw3_off == dw) {
+                return true;
+            }
+        }
+        for (const auto& fmask : fmasks) {
+            if (dw >= fmask.sharp_idx && dw < fmask.sharp_idx + 8) {
+                return true;
+            }
+        }
+        return false;
     }
     VAddr ProgramBase() const noexcept {
         const auto* snapshot = num_ud_snapshots ? Snapshot() : nullptr;
@@ -203,14 +256,25 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+        srt_patches.clear();
         if (srt_info.walker_func) {
-            // sotcport: see PFN_SrtWalker. GPU command processor thread only.
+            // sotcport: see PFN_SrtWalker. GPU command processor thread only. When the check
+            // had to fetch GPU data, the walk runs again: a fetched pointer can lead to other
+            // reads, which are checked too (a few rounds at most).
             static std::vector<u64> read_log(SrtReadLogSize);
-            const u64* end = srt_info.walker_func(user_data.data(), flattened_ud_buf.data(),
-                                                  read_log.data());
-            ASSERT(end <= read_log.data() + read_log.size());
-            if (SrtReadCheck && SrtReadCheck(read_log.data(), end)) {
-                srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), read_log.data());
+            for (u32 round = 0;; ++round) {
+                const u64* end = srt_info.walker_func(user_data.data(), flattened_ud_buf.data(),
+                                                      read_log.data());
+                ASSERT(end <= read_log.data() + read_log.size());
+                srt_patches.clear();
+                if (!SrtReadCheck || !SrtReadCheck(*this, read_log.data(), end)) {
+                    break;
+                }
+                if (round == 3) {
+                    srt_info.walker_func(user_data.data(), flattened_ud_buf.data(),
+                                         read_log.data());
+                    break;
+                }
             }
         }
     }

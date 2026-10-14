@@ -99,9 +99,18 @@ public:
     void ExtendWriteFault(VAddr device_addr);
 
     /// Finds a buffer for the specified region.
+    /// sotcport: `shadowed` (with is_written): the CPU already holds what the GPU will write
+    /// there (Rasterizer::ShadowCopyShader), so the write is not tracked as GPU-modified.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
-                                                             bool is_texel_buffer = false);
+                                                             bool is_texel_buffer = false,
+                                                             bool shadowed = false);
+
+    /// sotcport: CPU memory at [addr, +size) now holds what the GPU's copy will hold once the
+    /// work recorded so far has run (the GPU command thread wrote it there itself): those bytes
+    /// stop counting as GPU-modified. Waits for asynchronous readbacks still bringing older
+    /// bytes back there. GPU command thread, with nothing queued for stage B that writes there.
+    void ForgetGpuWrites(VAddr addr, u64 size);
 
     /// Attempts to obtain a buffer without modifying the cache contents.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBufferForImage(VAddr device_addr, u32 size);

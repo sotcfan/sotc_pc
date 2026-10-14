@@ -19,6 +19,7 @@
 #include "diag/resource_dump.h"
 #include "diag/copy_watch.h"
 #include "diag/freeze_watch.h"
+#include "diag/memory_types.h"
 #include "diag/packet_stats.h"
 #include "hle/kernel/filesystem.h"
 #include "hle/savedata/savedata.h"
@@ -158,6 +159,7 @@ int main(int argc, char** argv) {
         diag::InstallResourceDump(); // SOTC_DUMP_RESOURCES
         diag::InstallCopyWatch();    // SOTC_WATCH_COPIES
         diag::InstallPacketStats();  // SOTC_PACKET_STATS
+        diag::InstallMemoryTypes();  // SOTC_MEMORY_TYPES
         linker.Link(eboot);
         linker.Start(eboot, game_args);
         RunMainLoop(dump_after_seconds);

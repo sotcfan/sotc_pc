@@ -44,6 +44,9 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
 }
 
 PFN_SrtReadCheck SrtReadCheck = nullptr;
+// sotcport: cache-neutral begin
+u64 SrtWalkProgramHash = 0; // sotcport (diagnostics)
+// sotcport: cache-neutral end
 
 } // namespace Shader
 
@@ -175,6 +178,11 @@ struct PassInfo {
 
     // Bumped during codegen to assign offsets to readconsts
     u16 dst_off_dw;
+
+    // sotcport: one entry per logged guest read, in log order (see Shader::SrtReadPointer).
+    std::vector<u16> read_map;
+    // sotcport: flattened dwords the walker reads back to compute offsets (the CPU needs them).
+    boost::container::small_vector<u16, 8> offset_sources;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -526,6 +534,7 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     case IR::Opcode::ReadConstBuffer:
         if (u16 offset = GetFlatbufOffset(pass_info.DeduplicateInstruction(inst)); offset != 0) {
             c.mov(reg, ptr[rsi + (offset << 2)]);
+            pass_info.offset_sources.push_back(offset); // sotcport
             return true;
         }
         return false;
@@ -573,10 +582,11 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
 }
 
 // sotcport: r9 = the guest address being read (through the mirror), appended to the read log
-// at r11 (see PFN_SrtWalker).
-static inline void LogGuestRead(Xbyak::CodeGenerator& c) {
+// at r11 (see PFN_SrtWalker); `entry` describes the read (see Shader::SrtReadPointer).
+static inline void LogGuestRead(Xbyak::CodeGenerator& c, PassInfo& pass_info, u16 entry) {
     c.mov(ptr[r11], r9);
     c.add(r11, 8);
+    pass_info.read_map.push_back(entry);
 }
 
 // `in_guest`: rdi points to guest memory (through the mirror), not to the user data registers.
@@ -592,7 +602,7 @@ static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const I
         c.lea(r9, ptr[rdi + r10]);
     }
     if (in_guest) {
-        LogGuestRead(c);
+        LogGuestRead(c, pass_info, SrtReadPointer);
     }
     c.mov(rdi, ptr[r9]);
     c.mov(r10, 0xFFFFFFFFFFFFULL);
@@ -640,7 +650,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
             c.mov(r10d, r10d);
             c.lea(r9, ptr[rdi + r10]);
         }
-        LogGuestRead(c);
+        LogGuestRead(c, pass_info, pass_info.dst_off_dw);
         c.mov(r10d, dword[r9]);
         c.mov(ptr[rsi + (pass_info.dst_off_dw << 2)], r10d);
 
@@ -696,6 +706,15 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     }
 
     info.srt_info.flattened_bufsize_dw = pass_info.dst_off_dw;
+
+    // sotcport: data the walker computes offsets from must be current on the CPU.
+    for (u16& entry : pass_info.read_map) {
+        if (entry != SrtReadPointer &&
+            std::ranges::find(pass_info.offset_sources, entry) != pass_info.offset_sources.end()) {
+            entry |= SrtReadCpuNeeded;
+        }
+    }
+    info.srt_read_map = std::move(pass_info.read_map);
 }
 
 static bool IsReadConstSource(const IR::Value base) {

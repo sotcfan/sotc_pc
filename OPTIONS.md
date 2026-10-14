@@ -67,6 +67,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_VK_RECORD_THREAD=0` | on | Turns off recording Vulkan commands on a separate thread. |
 | `SOTC_FLUSH_EVERY=<n>` | 256 | With the draw pipeline, submits GPU work early every `n` draws and dispatches, so the GPU starts sooner. |
 | `SOTC_SLOW_PENDING_OPS=1` | off | Goes back to checking pending GPU operations with a system call per draw (A/B measurements). |
+| `SOTC_SHADOW_COPY=1` | off | Experimental. The game copies tables of constants and descriptors with a small compute shader, and later draws read them: the command processor thread then had to wait for the GPU (~0.5 ms, up to ~1,500 times a second). The CPU now computes those copies too, as the commands arrive, so nothing waits (the GPU still runs them). +15–20% frames per second in heavy scenes. `SOTC_VERIFY_SHADOW_COPY=1` compares every 7th one with what the GPU wrote (slow; diagnostics). |
+| `SOTC_SRT_PATCHES=1` | off | Experimental. Constants a shader reads that the GPU itself wrote are copied on the GPU, right before the draw, instead of being read back on the CPU. Use with `SOTC_SHADOW_COPY=1` (alone it is slower). |
 
 ## Diagnostics
 
@@ -83,6 +85,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_PACKET_STATS=1` | Statistics of the GPU command packets the game sends. |
 | `SOTC_SRT_FETCH_PAGES=1` | The shader resource walker downloads whole pages the GPU wrote, instead of exact bytes (rules out reads the byte check would miss). |
 | `SOTC_TRACE_FLATBUF=<hash>` | Logs the flattened user data and the samplers the GPU layer gives that shader (hex hash, e.g. `bd2fa723`) at every draw or dispatch. |
+| `SOTC_MEMORY_TYPES=1` | Every 10 s, how much the GPU layer reads and binds of each kind of game memory (Onion, Garlic, flexible) and how the game maps memory (sizes, alignments). |
+| `SOTC_TRACE_SRT_READBACKS=1` | Logs a sample of the times the command processor thread had to wait for data the GPU wrote (shader, which read, address, value before and after). |
 | `SOTC_STREAM_THRESHOLD=<bytes>` | Read-only buffers up to that size are copied straight from game memory at each draw (default 8 KiB) instead of coming from the GPU layer's tracked copies (rules out a missed CPU write). |
 
 ## Native renderer (work in progress)

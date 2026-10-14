@@ -21,10 +21,26 @@ using PFN_SrtWalker = u64* PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*fla
                                             u64* /*read_log*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
+struct Info;
+
+// sotcport: what each entry of the walker's read log is (Info::srt_read_map, generated with the
+// walker, whose code is straight-line: every walk logs the same reads in the same order). A data
+// read gives the flattened user data dword it fills (SrtReadDwordMask); SrtReadCpuNeeded marks
+// data the walker itself computes later offsets from. SrtReadPointer is a pointer read (8 bytes).
+constexpr u16 SrtReadPointer = 0xFFFF;
+constexpr u16 SrtReadCpuNeeded = 0x8000;
+constexpr u16 SrtReadDwordMask = 0x7FFF;
+
 // Set by the GPU layer: makes CPU memory current for the logged reads [begin, end) the GPU wrote
-// to, returning true if it had to (the walker's output is then stale).
-using PFN_SrtReadCheck = bool (*)(const u64* begin, const u64* end);
+// to, returning true if it had to (the walker's output is then stale). sotcport: data the CPU
+// does not need (no pointer, no descriptor, no offset) is left to the GPU instead: listed in
+// info.srt_patches, copied on the GPU into the flattened user data before the shader runs.
+using PFN_SrtReadCheck = bool (*)(Info& info, const u64* begin, const u64* end);
 extern PFN_SrtReadCheck SrtReadCheck;
+// sotcport: cache-neutral begin
+// sotcport (diagnostics, SOTC_TRACE_SRT_READBACKS): the program whose SRT is being walked.
+extern u64 SrtWalkProgramHash;
+// sotcport: cache-neutral end
 constexpr size_t SrtReadLogSize = 1 << 16;
 
 struct PersistentSrtInfo {

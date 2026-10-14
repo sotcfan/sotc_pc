@@ -21,6 +21,7 @@
 
 #include <vk_mem_alloc.h>
 #include "perf_temp.h" // sotcport TEMP
+#include "diag/memory_types.h"
 
 namespace VideoCore {
 
@@ -431,7 +432,8 @@ void BufferCache::DownloadWindows(std::span<const std::pair<VAddr, u64>> windows
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
-                                                        bool is_written, bool is_texel_buffer) {
+                                                        bool is_written, bool is_texel_buffer,
+                                                        bool shadowed) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     // sotcport: SOTC_STREAM_THRESHOLD=<bytes> raises the size limit (diagnostics: larger
     // read-only buffers then come straight from memory, not from tracked arena copies).
@@ -439,7 +441,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         const char* bytes = std::getenv("SOTC_STREAM_THRESHOLD");
         return bytes ? std::strtoull(bytes, nullptr, 0) : u64{STREAM_THRESHOLD};
     }();
+    diag::NoteMemoryAccess(is_written ? diag::MemAccess::BufferWritten : diag::MemAccess::BufferRead,
+                           device_addr, size); // sotcport (SOTC_MEMORY_TYPES)
     if (!is_written && size <= stream_threshold && !IsRegionGpuModified(device_addr, size)) {
+        diag::NoteMemoryAccess(diag::MemAccess::UploadRead, device_addr, size);
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
@@ -452,7 +457,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     // sotcport: the exact range first, then the page state (SynchronizeMemory): an asynchronous
     // readback completing in between (CompleteReadback) only clears the state of pages with no
     // exact range pending, so it cannot clear this write's mark.
-    if (is_written) {
+    if (is_written && !shadowed) {
         // sotcport: the same storage buffers are bound for writing draw after draw; the interval
         // set insert (allocation, merging) is skipped when the range is already there.
         std::scoped_lock lock{gpu_modified_mutex}; // sotcport: two-stage draw pipeline
@@ -460,7 +465,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             gpu_modified_ranges.Add(device_addr, size);
         }
     }
-    SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    SynchronizeMemory(arena, device_addr, size, is_written && !shadowed, is_texel_buffer);
     return {arena, arena->Offset(device_addr)};
 }
 
@@ -473,6 +478,16 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
     memory->CopySparseMemory(device_addr, staging.mapped, staging.size);
     staging.Flush();
     return {staging.buffer, staging.offset};
+}
+
+void BufferCache::ForgetGpuWrites(VAddr addr, u64 size) {
+    WaitForReadbacks(addr, size);
+    std::scoped_lock lock{gpu_modified_mutex};
+    if (!gpu_modified_ranges.Intersects(addr, size)) {
+        return;
+    }
+    gpu_modified_ranges.Subtract(addr, size);
+    UnmarkDownloaded(addr, size);
 }
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
@@ -644,6 +659,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     if (!copies.empty()) {
         const auto staging = staging_pool.Request(total_size_bytes, MemoryType::HostUncached);
         for (auto& copy : copies) {
+            diag::NoteMemoryAccess(diag::MemAccess::UploadRead, copy.dstOffset, copy.size);
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
             copy.srcOffset += staging.offset;
             copy.dstOffset -= arena->cpu_addr;

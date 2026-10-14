@@ -731,6 +731,9 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
+    // sotcport: cache-neutral begin
+    Shader::SrtWalkProgramHash = params.hash; // sotcport (diagnostics, SOTC_TRACE_SRT_READBACKS)
+    // sotcport: cache-neutral end
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 

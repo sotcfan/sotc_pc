@@ -352,7 +352,8 @@ std::mutex g_mutex;
 std::map<std::string, std::pair<uint64_t, uint64_t>> g_waits;                   // count, ns
 // (64 KiB region, is_write, game code address of the fault) -> count, bytes
 std::map<std::tuple<uint64_t, bool, uint64_t>, std::pair<uint64_t, uint64_t>> g_readbacks;
-std::atomic<uint64_t> g_walker_runs, g_walker_reads, g_walker_fetches;
+std::atomic<uint64_t> g_walker_runs, g_walker_reads, g_walker_fetches, g_walker_patched,
+    g_walker_patches, g_shadow_copies, g_shadow_bytes;
 // The same counters for the frame being made (SOTC_SPIKES); reset at every flip.
 std::atomic<uint64_t> g_frame_count[NumSlots];
 std::atomic<uint64_t> g_frame_ns[NumSlots];
@@ -477,6 +478,22 @@ void NoteSrtReads(uint64_t reads, bool fetched) {
     g_walker_fetches += fetched;
 }
 
+void NoteShadowCopy(uint64_t bytes) {
+    if (!g_enabled) {
+        return;
+    }
+    g_shadow_copies++;
+    g_shadow_bytes += bytes;
+}
+
+void NoteSrtPatches(uint64_t patches) {
+    if (!g_enabled || !patches) {
+        return;
+    }
+    g_walker_patched++;
+    g_walker_patches += patches;
+}
+
 void NoteDownload(uint64_t address, const uint8_t* data, uint64_t size) {
     if (!g_enabled) {
         return;
@@ -583,9 +600,13 @@ void Report() {
              g_download_bytes.exchange(0) / 1024.0 / seconds,
              g_download_changed.exchange(0) / 1024.0 / seconds);
     LOG_INFO(Render,
-             "PERF walker: {:.0f} runs/s, {:.0f} reads/s, {:.0f}/s needed a readback",
+             "PERF walker: {:.0f} runs/s, {:.0f} reads/s, {:.0f}/s needed a readback, {:.0f}/s "
+             "left GPU-written data to the GPU ({:.0f} dwords/s); {:.0f} copy dispatches/s "
+             "computed on the CPU too ({:.0f} KB/s)",
              g_walker_runs.exchange(0) / seconds, g_walker_reads.exchange(0) / seconds,
-             g_walker_fetches.exchange(0) / seconds);
+             g_walker_fetches.exchange(0) / seconds, g_walker_patched.exchange(0) / seconds,
+             g_walker_patches.exchange(0) / seconds, g_shadow_copies.exchange(0) / seconds,
+             g_shadow_bytes.exchange(0) / 1024.0 / seconds);
     // VRAM: when it fills, the driver moves memory to system RAM and the GPU slows down a lot.
     LOG_INFO(Render, "PERF VRAM: {} MB used; texture GC pressured at {} MB, critical at {} MB",
              g_vram_used.load() >> 20, g_vram_pressure.load() >> 20, g_vram_critical.load() >> 20);

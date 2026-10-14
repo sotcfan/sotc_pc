@@ -5,6 +5,7 @@
 // Vulkan objects.
 
 #include "render/shader_translate.h"
+#include "gpu/gpu.h"
 
 #include <algorithm>
 #include <bit>
@@ -255,6 +256,15 @@ static void FillSampler(SamplerBinding& out, const AmdGpu::Sampler& sampler, boo
 // samplers), with what the native renderer needs to provide each, and its flattened user data.
 static void FillBindings(const Shader::Info& info, TranslatedProgram& out) {
     out.flatbuf = info.flattened_ud_buf;
+    // Dwords the GPU wrote are left to the GPU by the walk (Info::srt_patches) and are stale in
+    // CPU memory: take what the GPU layer's copy of memory holds.
+    for (const auto& patch : info.srt_patches) {
+        u32 value = 0;
+        if (patch.dst_dw < out.flatbuf.size() &&
+            gpu::PeekLayerBuffer(patch.address, sizeof(value), reinterpret_cast<u8*>(&value))) {
+            out.flatbuf[patch.dst_dw] = value;
+        }
+    }
     out.flatbuf_reads.clear();
     if (info.srt_info.walker_func) {
         // The walk again, for its log of reads (Info::RefreshFlatBuf keeps it to itself).

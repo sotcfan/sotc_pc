@@ -391,6 +391,7 @@ void Info::Serialize(Serialization::Archive& ar) const {
     info.Write(this, sizeof(InfoPersistent));
     info.Write(flattened_ud_buf);
     srt_info.Serialize(ar);
+    Serialization::Writer{ar}.Write(srt_read_map); // sotcport
 }
 
 bool Info::Deserialize(Serialization::Archive& ar) {
@@ -399,7 +400,12 @@ bool Info::Deserialize(Serialization::Archive& ar) {
     info.Read(this, sizeof(Shader::InfoPersistent));
     info.Read(flattened_ud_buf);
 
-    return srt_info.Deserialize(ar);
+    if (!srt_info.Deserialize(ar)) {
+        return false;
+    }
+    srt_read_map.clear();
+    Serialization::Reader{ar}.Read(srt_read_map); // sotcport
+    return true;
 }
 
 void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
