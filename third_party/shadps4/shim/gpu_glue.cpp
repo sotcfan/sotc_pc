@@ -528,6 +528,46 @@ void NoteVram(uint64_t used, uint64_t pressure, uint64_t critical) {
     g_vram_critical.store(critical, std::memory_order_relaxed);
 }
 
+// TEMP timeline (see perf::Mark).
+struct TimelineEvent {
+    uint64_t ns;
+    char kind;
+    uint64_t value;
+};
+constexpr size_t TimelineSize = size_t{1} << 16;
+std::array<TimelineEvent, TimelineSize> g_timeline{};
+std::atomic<uint64_t> g_timeline_next{0};
+const int g_timeline_every = [] {
+    const char* env = std::getenv("SOTC_FRAME_TIMELINE");
+    return env ? std::max(1, std::atoi(env)) : 0;
+}();
+
+void Mark(char kind, uint64_t value) {
+    if (!g_timeline_every) {
+        return;
+    }
+    const uint64_t index = g_timeline_next.fetch_add(1, std::memory_order_relaxed);
+    g_timeline[index % TimelineSize] = {Now(), kind, value};
+    if (kind != 'P') {
+        return;
+    }
+    static uint64_t last_present = 0, frames = 0;
+    if (++frames % g_timeline_every == 0 && last_present && index - last_present < TimelineSize) {
+        const uint64_t t0 = g_timeline[last_present % TimelineSize].ns;
+        std::string text;
+        for (uint64_t i = last_present; i <= index; ++i) {
+            const auto& event = g_timeline[i % TimelineSize];
+            text += fmt::format(" {:.2f}{}", (event.ns - t0) / 1e6, event.kind);
+            if (event.value) {
+                text += fmt::format("({})", event.value);
+            }
+        }
+        LOG_INFO(Render, "TIMELINE frame {} ({:.2f} ms):{}", frames,
+                 (g_timeline[index % TimelineSize].ns - t0) / 1e6, text);
+    }
+    last_present = index;
+}
+
 void NoteFrameForSpikes() {
     // Called at every flip (presentation thread). A frame here is the time between two flips.
     static uint64_t last = 0, frames = 0;
@@ -808,6 +848,7 @@ std::atomic<unsigned long long> g_frames_presented{0};
 void NoteFramePresented() {
     g_frames_presented.fetch_add(1, std::memory_order_relaxed);
     perf::NoteFrameForSpikes(); // sotcport TEMP (SOTC_SPIKES)
+    perf::Mark('P'); // TEMP timeline
 }
 
 namespace {

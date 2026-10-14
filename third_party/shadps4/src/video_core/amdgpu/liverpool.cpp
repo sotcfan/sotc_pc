@@ -356,10 +356,15 @@ void Liverpool::Process(std::stop_token stoken) {
 
         VideoCore::StartCapture();
         perf::Scope perf_busy{perf::GpuCommBusy}; // sotcport TEMP
+        perf::Mark('a'); // TEMP timeline: command processor wakes
 
         curr_qid = -1;
 
         while (num_submits || num_commands) {
+            // sotcport: between packets: stage B may run urgent work (readbacks) again.
+            if (rasterizer) {
+                rasterizer->ReleaseStageA();
+            }
             ProcessCommands();
 
             curr_qid = (curr_qid + 1) % num_mapped_queues;
@@ -400,8 +405,13 @@ void Liverpool::Process(std::stop_token stoken) {
 
         // sotcport: the guest may free what queued work still touches once the GPU is idle
         // (bbport's heap corruption): stage B runs dry first.
+        perf::Mark('i'); // TEMP timeline: command processor out of work
         if (rasterizer) {
             rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonGpuIdle);
+        }
+        perf::Mark('d'); // TEMP timeline: stage B drained, GPU idle signalled
+        if (rasterizer) {
+            rasterizer->ReleaseStageA(); // sotcport: idle
         }
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }
@@ -1561,6 +1571,7 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 }
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
+    perf::Mark('S', dcb.size()); // TEMP timeline: the game submits
     auto& queue = mapped_queues[GfxQueueId];
     // sotcport (SOTC_MEMORY_TYPES): where the command buffers live.
     diag::NoteMemoryAccess(diag::MemAccess::GfxCommands, reinterpret_cast<u64>(dcb.data()),

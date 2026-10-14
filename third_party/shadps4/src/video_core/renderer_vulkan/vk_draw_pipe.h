@@ -12,13 +12,18 @@
 
 #pragma once
 
+#include "perf_temp.h" // sotcport TEMP
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <x86intrin.h>
 
@@ -71,8 +76,33 @@ public:
         return reinterpret_cast<u8*>(header + 1);
     }
 
+    /// sotcport: runs `work` on stage B between two packets, ahead of the packets queued, and
+    /// returns when it has run. For guest threads that need the GPU's data now (readbacks): the
+    /// work they wait for has already been recorded (the game waited for a fence stage B
+    /// signalled), so stage B can record the copy at once instead of after everything stage A
+    /// queued since (a drain of the whole pipeline, 1-2 ms while a frame is decoded).
+    void RunUrgent(std::function<void()> work) {
+        bool done = false;
+        {
+            std::scoped_lock lock{urgent_mutex};
+            urgent.push_back({std::move(work), &done});
+            urgent_pending.store(true, std::memory_order_seq_cst);
+        }
+        wake.fetch_add(1, std::memory_order_seq_cst);
+        wake.notify_one();
+        std::unique_lock lock{urgent_mutex};
+        urgent_cv.wait(lock, [&] { return done; });
+    }
+
+    /// sotcport: stage A stopped recording on its own (between packets, or idle): stage B may
+    /// run urgent work again.
+    void ReleaseStageA() {
+        stage_a_working.store(false, std::memory_order_seq_cst);
+    }
+
     /// Stage A: hands the packet from Begin() to stage B.
     void Commit(u32 payload_size) {
+        stage_a_working.store(false, std::memory_order_seq_cst);
         reinterpret_cast<Header*>(ring.get() + head % Capacity)->payload = payload_size;
         head += pending_size;
         published.store(head, std::memory_order_seq_cst);
@@ -130,11 +160,17 @@ public:
     /// Stage A: waits until stage B has run every committed packet.
     void Drain(u32 reason = ReasonOther) {
         if (consumed.load(std::memory_order_acquire) == head) {
+            // Empty, but stage B may be running urgent work: the same exclusion as below.
+            stage_a_working.store(true, std::memory_order_seq_cst);
+            while (urgent_running.load(std::memory_order_seq_cst)) {
+                _mm_pause();
+            }
             return;
         }
         drains.fetch_add(1, std::memory_order_relaxed);
         const u32 slot = reason < NumReasons ? reason : ReasonOther;
         drains_by_reason[slot].fetch_add(1, std::memory_order_relaxed);
+        perf::Mark('w', slot); // TEMP timeline: stage A waits for stage B
         const u64 start = __rdtsc();
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
@@ -143,10 +179,18 @@ public:
                 std::this_thread::yield();
             }
         }
+        // sotcport: stage A records on its own now; stage B may be running urgent work (see
+        // RunUrgent), which must end first and not start again until stage A is done
+        // (ReleaseStageA). Dekker-style: each side announces itself, then checks the other.
+        stage_a_working.store(true, std::memory_order_seq_cst);
+        while (urgent_running.load(std::memory_order_seq_cst)) {
+            _mm_pause();
+        }
         const u64 waited = __rdtsc() - start;
         drain_cycles.fetch_add(waited, std::memory_order_relaxed);
         drain_cycles_total.fetch_add(waited, std::memory_order_relaxed);
         cycles_by_reason[slot].fetch_add(waited, std::memory_order_relaxed);
+        perf::Mark('W');
     }
 
     /// Stage A: position after the last committed packet; Reached(position) once B ran it.
@@ -194,18 +238,26 @@ private:
             return env ? std::max(0, std::atoi(env)) : 200;
         }());
         while (true) {
+            if (urgent_pending.load(std::memory_order_acquire)) {
+                RunUrgentWork();
+            }
             u64 available = published.load(std::memory_order_acquire);
             if (available == at) {
+                perf::Mark('e'); // TEMP timeline: stage B out of packets
                 const auto spin_until = std::chrono::steady_clock::now() + spin_time;
                 for (u32 spins = 1; available == at; ++spins) {
                     if (stop.stop_requested()) {
                         return;
+                    }
+                    if (urgent_pending.load(std::memory_order_acquire)) {
+                        RunUrgentWork();
                     }
                     _mm_pause();
                     if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.store(true, std::memory_order_seq_cst);
                         if (published.load(std::memory_order_seq_cst) == at &&
+                            !urgent_pending.load(std::memory_order_seq_cst) &&
                             !stop.stop_requested()) {
                             wake.wait(seen, std::memory_order_seq_cst);
                         }
@@ -213,6 +265,7 @@ private:
                     }
                     available = published.load(std::memory_order_acquire);
                 }
+                perf::Mark('b'); // TEMP timeline: stage B has packets again
             }
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
@@ -227,6 +280,43 @@ private:
             consumed.store(at, std::memory_order_release);
         }
     }
+
+    void RunUrgentWork() {
+        // Not while stage A records on its own (it drained): retried on the next loop.
+        urgent_running.store(true, std::memory_order_seq_cst);
+        if (stage_a_working.load(std::memory_order_seq_cst)) {
+            urgent_running.store(false, std::memory_order_seq_cst);
+            return;
+        }
+        std::vector<UrgentWork> work;
+        {
+            std::scoped_lock lock{urgent_mutex};
+            work.swap(urgent);
+            urgent_pending.store(false, std::memory_order_relaxed);
+        }
+        for (auto& item : work) {
+            item.work();
+        }
+        urgent_running.store(false, std::memory_order_seq_cst);
+        {
+            std::scoped_lock lock{urgent_mutex};
+            for (auto& item : work) {
+                *item.done = true;
+            }
+        }
+        urgent_cv.notify_all();
+    }
+
+    struct UrgentWork {
+        std::function<void()> work;
+        bool* done;
+    };
+    std::mutex urgent_mutex;
+    std::condition_variable urgent_cv;
+    std::vector<UrgentWork> urgent; ///< under urgent_mutex
+    std::atomic<bool> urgent_pending{false};
+    std::atomic<bool> urgent_running{false};  ///< stage B is running urgent work
+    std::atomic<bool> stage_a_working{false}; ///< stage A drained and records on its own
 
     static inline thread_local bool on_stage_b = false;
     Handler handler;

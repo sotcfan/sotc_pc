@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <functional>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "common/unique_function.h"
@@ -210,6 +211,15 @@ private:
     [[nodiscard]] bool UseDrawPipe() const noexcept {
         return draw_pipe != nullptr;
     }
+
+public:
+    /// sotcport: runs `work` on stage B of the draw pipeline ahead of its queued packets and
+    /// returns when it ran (see DrawPipe::RunUrgent); false without the draw pipeline.
+    bool RunOnStageB(std::function<void()> work);
+    /// sotcport: the command processor is between packets (see DrawPipe::ReleaseStageA).
+    void ReleaseStageA();
+
+private:
     [[nodiscard]] bool OnStageA() const;
     // FilterDraw's checks without its side effects: false when it would skip the draw or run a
     // pass of its own (fast clear elimination, resolve, depth/stencil copy).

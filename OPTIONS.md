@@ -87,6 +87,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_PACKET_STATS=1` | Statistics of the GPU command packets the game sends. |
 | `SOTC_SRT_FETCH_PAGES=1` | The shader resource walker downloads whole pages the GPU wrote, instead of exact bytes (rules out reads the byte check would miss). |
 | `SOTC_TRACE_FLATBUF=<hash>` | Logs the flattened user data and the samplers the GPU layer gives that shader (hex hash, e.g. `bd2fa723`) at every draw or dispatch. |
+| `SOTC_FRAME_TIMELINE=<n>` | Every n-th frame, logs a timeline in milliseconds since the previous one: game submissions (`S`, with their size), flips (`F`), presentation (`P`), the command processor waking (`a`) and running out of work (`i`, `d`), stage B running out of packets and getting some (`e`, `b`), stage A waiting for stage B (`w` with the reason, `W`), guest readbacks (`R`, `r`). |
+| `SOTC_READBACK_ON_A=1` | Guest readbacks go through the command processor after draining the draw pipeline, as before (A/B measurements; by default stage B records the copy at once). |
 | `SOTC_MEMORY_TYPES=1` | Every 10 s, how much the GPU layer reads and binds of each kind of game memory (Onion, Garlic, flexible) and how the game maps memory (sizes, alignments). |
 | `SOTC_TRACE_SRT_READBACKS=1` | Logs a sample of the times the command processor thread had to wait for data the GPU wrote (shader, which read, address, value before and after). |
 | `SOTC_STREAM_THRESHOLD=<bytes>` | Read-only buffers up to that size are copied straight from game memory at each draw (default 8 KiB) instead of coming from the GPU layer's tracked copies (rules out a missed CPU write). |

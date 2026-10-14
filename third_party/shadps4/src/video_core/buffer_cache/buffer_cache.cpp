@@ -15,6 +15,7 @@
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h" // sotcport: RunOnStageB
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -176,8 +177,17 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         return;
     }
     AsyncReadback readback;
-    liverpool->SendCommand<true>([&] { readback = PrepareReadback(device_addr, size); });
+    perf::Mark('R'); // TEMP timeline: a guest thread reads GPU data back
+    // sotcport: stage B records the copy right away (the game read after a fence stage B
+    // signalled, so the work writing these bytes is recorded already); without the draw
+    // pipeline the command processor does it.
+    auto* rasterizer = liverpool->GetRasterizer();
+    if (!rasterizer ||
+        !rasterizer->RunOnStageB([&] { readback = PrepareReadback(device_addr, size); })) {
+        liverpool->SendCommand<true>([&] { readback = PrepareReadback(device_addr, size); });
+    }
     CompleteReadback(readback, device_addr, size, is_write);
+    perf::Mark('r');
 }
 
 BufferCache::AsyncReadback BufferCache::PrepareReadback(VAddr device_addr, u64 size) {

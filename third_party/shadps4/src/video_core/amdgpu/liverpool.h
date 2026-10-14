@@ -116,6 +116,11 @@ public:
         vo_port = port;
     }
 
+    /// sotcport: the rasterizer bound, or null.
+    [[nodiscard]] Vulkan::Rasterizer* GetRasterizer() const noexcept {
+        return rasterizer;
+    }
+
     void BindRasterizer(Vulkan::Rasterizer* rasterizer_) {
         rasterizer = rasterizer_;
     }

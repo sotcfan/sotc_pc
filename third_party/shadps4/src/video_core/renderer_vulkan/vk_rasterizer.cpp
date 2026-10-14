@@ -999,6 +999,30 @@ bool Rasterizer::IsGpuSideThread() const {
     return OnStageA() || DrawPipe::OnStageB();
 }
 
+void Rasterizer::ReleaseStageA() {
+    if (draw_pipe) {
+        draw_pipe->ReleaseStageA();
+    }
+}
+
+bool Rasterizer::RunOnStageB(std::function<void()> work) {
+    // SOTC_READBACK_ON_A=1: the command processor does it after draining (A/B measurements).
+    static const bool on_a = std::getenv("SOTC_READBACK_ON_A") != nullptr;
+    if (!draw_pipe || on_a) {
+        return false;
+    }
+    if (DrawPipe::OnStageB()) {
+        work();
+    } else {
+        draw_pipe->RunUrgent([this, &work] {
+            Scheduler::pipe_busy.store(&scheduler, std::memory_order_relaxed); // TEMP check
+            work();
+            Scheduler::pipe_busy.store(nullptr, std::memory_order_relaxed);
+        });
+    }
+    return true;
+}
+
 void Rasterizer::DrainDrawPipe(u32 reason) {
     if (draw_pipe && !DrawPipe::OnStageB() && OnStageA()) {
         draw_pipe->Drain(reason);

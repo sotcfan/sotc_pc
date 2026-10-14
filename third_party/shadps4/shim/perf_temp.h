@@ -50,6 +50,9 @@ void NoteWaitRegMem(uint64_t address, bool met, bool equal, uint32_t ref);
 void NoteFrameInterval(uint64_t ns);
 // Called at every flip: with SOTC_SPIKES=<ms>, logs the waits of each frame longer than <ms>.
 void NoteFrameForSpikes();
+// TEMP timeline (SOTC_FRAME_TIMELINE=<n>): events stamped by any thread; every n-th presented
+// frame, the events since the previous one are logged.
+void Mark(char kind, uint64_t value = 0);
 // Device-local memory in use (VK_EXT_memory_budget) and the texture cache's garbage collector
 // thresholds, all in bytes; refreshed at every submit by TextureCache::GarbageCollectImages.
 void NoteVram(uint64_t used, uint64_t pressure, uint64_t critical);
