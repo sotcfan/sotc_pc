@@ -139,10 +139,10 @@ int main(int argc, char** argv) {
 
     try {
         crash::Install();
-        if (!platform::AcquireInstanceLock(data_dir)) {
-            std::fprintf(stderr,
-                         "error: sotcport is already running (data folder %s); close it first\n",
-                         data_dir.string().c_str());
+        // In the default data folder whatever --data says: two at once also fight over the
+        // GPU and the window (benchmarks run with a data folder of their own).
+        if (!platform::AcquireInstanceLock(DefaultDataDir())) {
+            std::fprintf(stderr, "error: sotcport is already running; close it first\n");
             return 1;
         }
         hle::kernel::InitializeFilesystem(std::filesystem::absolute(game_dir), data_dir);

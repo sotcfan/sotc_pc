@@ -9,6 +9,14 @@
 # 80 to 110 s. Results go to ~/.local/share/sotcport/bench/<name>. SOTC_PERF=1 enables
 # the GPU layer's temporary counters (third_party/shadps4/shim/perf_temp.h) in the log.
 # SOTC_BUILD=<dir> runs the executable of another build directory (default build-clang).
+# The game runs with a data folder of its own (SOTC_BENCH_DATA, default
+# ~/.local/share/sotcport-bench): with the player's folder, "Continue" followed the player's
+# progress (so the scene changed between runs) and every run rewrote the player's profile save.
+# Before each run the saves are restored from $SOTC_BENCH_DATA/saves.snapshot (made once from the
+# player's saves), so every run starts at the same place (the GPU layer's folder, with the shader
+# cache and the screenshots, stays the player's: it does not follow --data). SOTC_BENCH_SLOT=<n> makes save slot n (SAVEDATA0ShadowProgress<n>) the
+# most recent one, the one "Continue" loads (the game sorts the saves by the time of
+# sce_sys/param.bin).
 # SOTC_BENCH_ROUTE=walk: instead of staying at the save point, walks out of it and runs across
 # the plain for two minutes (the 60 FPS goal is measured there), FPS measured from 80 to 190 s,
 # with frame time percentiles and the share of frames slower than 16.7 ms.
@@ -58,10 +66,23 @@ if [ "${SOTC_BENCH_ROUTE:-}" = walk ]; then
     window_to=190
 fi
 
+# The benchmark's own data folder (see above).
+data=${SOTC_BENCH_DATA:-$HOME/.local/share/sotcport-bench}
+player_data=$HOME/.local/share/sotcport
+mkdir -p "$data"
+if [ ! -d "$data/saves.snapshot" ]; then
+    cp -a "$player_data/saves" "$data/saves.snapshot"
+fi
+rm -rf "${data:?}/saves"
+cp -a "$data/saves.snapshot" "$data/saves"
+if [ -n "${SOTC_BENCH_SLOT:-}" ]; then
+    touch "$data/saves/1/SAVEDATA0ShadowProgress$SOTC_BENCH_SLOT/sce_sys/param.bin"
+fi
+
 cd "$root"
 SOTC_KEY_SCRIPT="$keys" SOTC_SCREENSHOTS="$shots" MANGOHUD_CONFIGFILE=$conf \
     systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 \
-    timeout $duration mangohud "./${SOTC_BUILD:-build-clang}/sotcport" "$SOTC_GAME" \
+    timeout $duration mangohud "./${SOTC_BUILD:-build-clang}/sotcport" "$SOTC_GAME" --data "$data" \
     > "$out/log.txt" 2>&1 || true
 wait
 
