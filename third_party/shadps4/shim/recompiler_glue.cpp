@@ -445,6 +445,8 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
     // What the draw packet puts in the registers (Liverpool::ProcessGraphics; the PM4Cmd*
     // structs in pm4_cmds.h, dword 0 the header).
     u32 index_offset = 0;
+    bool indirect = false;
+    u16 vertex_sgpr_offset = 0, instance_sgpr_offset = 0;
     switch ((packet[0] >> 8) & 0xff) {
     case 0x27: // DRAW_INDEX_2: max size, index base lo, index base hi, count, initiator
         regs.max_index_size = packet[1];
@@ -462,6 +464,19 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
     case 0x2d: // DRAW_INDEX_AUTO: count, initiator
         regs.num_indices = packet[1];
         break;
+    case 0x24: // DRAW_INDIRECT: data offset, base vertex SGPR, start instance SGPR, initiator
+    case 0x25: // DRAW_INDEX_INDIRECT: the same
+        if (!state.indirect) {
+            out.skipped = "indirect draw without its arguments";
+            return true;
+        }
+        out.indexed = ((packet[0] >> 8) & 0xff) == 0x25;
+        indirect = true;
+        // The CP writes the base vertex and start instance it fetched into these user data
+        // SGPRs (Rasterizer::DrawIndirect: DrawIndirectParams).
+        vertex_sgpr_offset = static_cast<u16>(packet[2] & 0xffff);
+        instance_sgpr_offset = static_cast<u16>(packet[3] & 0xffff);
+        break;
     default:
         out.skipped = std::format("draw packet {:#x}", (packet[0] >> 8) & 0xff);
         return true;
@@ -474,7 +489,11 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
         out.skipped = std::format("color control mode {}", u32(mode));
         return true;
     }
-    if (regs.primitive_type == AmdGpu::PrimitiveType::None || !regs.num_indices) {
+    // An indirect draw's count and instances come from its arguments (the GPU's culling often
+    // leaves them 0).
+    const bool empty = indirect ? !state.indirect_args[0] || !state.indirect_args[1]
+                                : !regs.num_indices;
+    if (regs.primitive_type == AmdGpu::PrimitiveType::None || empty) {
         out.skipped = "empty draw";
         return true;
     }
@@ -483,10 +502,13 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
         return true;
     }
 
-    if (!regs.ps_program.Address<u32*>() || !regs.vs_program.Address<u32*>()) {
-        out.skipped = "no pixel or vertex shader";
+    if (!regs.vs_program.Address<u32*>()) {
+        out.skipped = "no vertex shader";
         return true;
     }
+    // Without a pixel shader (depth-only passes: shadows, depth prepass) the pipeline has the
+    // vertex stage only and no color targets (RefreshGraphicsStages leaves the stage out).
+    const bool has_ps = regs.ps_program.Address<u32*>() != nullptr;
 
     // Color targets as the shader recompiler sees them (PipelineCache::RefreshGraphicsKey, first
     // pass).
@@ -520,67 +542,79 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
     const Shader::Profile profile = NativeProfile();
     Shader::Backend::Bindings bindings{};
 
-    const Shader::ShaderParams ps_params = AmdGpu::GetParams(regs.ps_program);
     const Shader::ShaderParams vs_params = AmdGpu::GetParams(regs.vs_program);
-    if (ps_params.code.empty() || vs_params.code.empty()) {
+    if (vs_params.code.empty()) {
         error = "no shader binary info (OrbShdr) after the code";
         return false;
     }
 
-    // PipelineCache::BuildRuntimeInfo, fragment stage.
+    u32 mrt_mask = 0; // the color targets the pixel shader writes
+    // (also what the rect/quad list tessellation shaders take; default without a pixel shader)
     Shader::RuntimeInfo ps_runtime{};
     ps_runtime.Initialize(Shader::HwStage::Fragment, Shader::SwStage::Fragment);
-    BuildCommon(ps_runtime, regs.ps_program);
-    auto& fs = ps_runtime.hw.fs;
-    fs.en_flags = regs.ps_input_ena;
-    fs.addr_flags = regs.ps_input_addr;
-    fs.num_inputs = regs.num_interp;
-    fs.front_face_all_bits = regs.barycentric_control.front_face_all_bits;
-    fs.depth_before_shader = regs.depth_shader_control.depth_before_shader;
-    fs.num_samples = 1;
-    fs.z_export_format = regs.z_export_format;
-    const u8 stencil_ref_export_enable = regs.depth_shader_control.stencil_op_val_export_enable |
-                                         regs.depth_shader_control.stencil_test_val_export_enable;
-    fs.mrtz_mask = regs.depth_shader_control.z_export_enable | (stencil_ref_export_enable << 1) |
-                   (regs.depth_shader_control.mask_export_enable << 2) |
-                   (regs.depth_shader_control.coverage_to_mask_enable << 3);
-    const auto& cb0_blend = regs.blend_control[0];
-    fs.dual_source_blending = false;
-    if (cb0_blend.enable) {
-        using Vulkan::LiverpoolToVK::IsDualSourceBlendFactor;
-        fs.dual_source_blending = IsDualSourceBlendFactor(cb0_blend.color_dst_factor) ||
-                                  IsDualSourceBlendFactor(cb0_blend.color_src_factor);
-        if (cb0_blend.separate_alpha_blend) {
-            fs.dual_source_blending |= IsDualSourceBlendFactor(cb0_blend.alpha_dst_factor) ||
-                                       IsDualSourceBlendFactor(cb0_blend.alpha_src_factor);
+    if (has_ps) {
+        const Shader::ShaderParams ps_params = AmdGpu::GetParams(regs.ps_program);
+        if (ps_params.code.empty()) {
+            error = "no shader binary info (OrbShdr) after the code";
+            return false;
         }
-    }
-    if (fs.dual_source_blending) {
-        out.skipped = "dual source blending";
-        return true;
-    }
-    for (u32 i = 0; i < regs.num_interp; i++) {
-        fs.inputs[i] = {
-            .param_index = u16(regs.ps_inputs[i].input_offset),
-            .is_default = u16(regs.ps_inputs[i].use_default),
-            .is_flat = u16(regs.ps_inputs[i].flat_shade),
-            .default_value = u16(regs.ps_inputs[i].default_value),
-        };
-    }
-    fs.color_buffers = color_buffers;
-    fs.clip_distance_emulation = false; // only needed on NVIDIA's driver
 
-    Shader::Info ps_info{Shader::HwStage::Fragment, Shader::SwStage::Fragment, ps_params};
-    Shader::Pools ps_pools;
-    const auto ps_ir = Shader::TranslateProgram(ps_params.code, ps_pools, ps_info, ps_runtime, profile);
-    out.ps.spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, ps_runtime, ps_ir, bindings);
-    if (ps_info.translation_failed) {
-        error = "the recompiler could not translate some pixel shader instructions";
-        return false;
+        // PipelineCache::BuildRuntimeInfo, fragment stage.
+        BuildCommon(ps_runtime, regs.ps_program);
+        auto& fs = ps_runtime.hw.fs;
+        fs.en_flags = regs.ps_input_ena;
+        fs.addr_flags = regs.ps_input_addr;
+        fs.num_inputs = regs.num_interp;
+        fs.front_face_all_bits = regs.barycentric_control.front_face_all_bits;
+        fs.depth_before_shader = regs.depth_shader_control.depth_before_shader;
+        fs.num_samples = 1;
+        fs.z_export_format = regs.z_export_format;
+        const auto& dsc = regs.depth_shader_control;
+        const u8 stencil_ref_export_enable =
+            dsc.stencil_op_val_export_enable | dsc.stencil_test_val_export_enable;
+        fs.mrtz_mask = dsc.z_export_enable | (stencil_ref_export_enable << 1) |
+                       (regs.depth_shader_control.mask_export_enable << 2) |
+                       (regs.depth_shader_control.coverage_to_mask_enable << 3);
+        const auto& cb0_blend = regs.blend_control[0];
+        fs.dual_source_blending = false;
+        if (cb0_blend.enable) {
+            using Vulkan::LiverpoolToVK::IsDualSourceBlendFactor;
+            fs.dual_source_blending = IsDualSourceBlendFactor(cb0_blend.color_dst_factor) ||
+                                      IsDualSourceBlendFactor(cb0_blend.color_src_factor);
+            if (cb0_blend.separate_alpha_blend) {
+                fs.dual_source_blending |= IsDualSourceBlendFactor(cb0_blend.alpha_dst_factor) ||
+                                           IsDualSourceBlendFactor(cb0_blend.alpha_src_factor);
+            }
+        }
+        if (fs.dual_source_blending) {
+            out.skipped = "dual source blending";
+            return true;
+        }
+        for (u32 i = 0; i < regs.num_interp; i++) {
+            fs.inputs[i] = {
+                .param_index = u16(regs.ps_inputs[i].input_offset),
+                .is_default = u16(regs.ps_inputs[i].use_default),
+                .is_flat = u16(regs.ps_inputs[i].flat_shade),
+                .default_value = u16(regs.ps_inputs[i].default_value),
+            };
+        }
+        fs.color_buffers = color_buffers;
+        fs.clip_distance_emulation = false; // only needed on NVIDIA's driver
+
+        Shader::Info ps_info{Shader::HwStage::Fragment, Shader::SwStage::Fragment, ps_params};
+        Shader::Pools ps_pools;
+        const auto ps_ir =
+            Shader::TranslateProgram(ps_params.code, ps_pools, ps_info, ps_runtime, profile);
+        out.ps.spirv = Shader::Backend::SPIRV::EmitSPIRV(profile, ps_runtime, ps_ir, bindings);
+        if (ps_info.translation_failed) {
+            error = "the recompiler could not translate some pixel shader instructions";
+            return false;
+        }
+        ps_info.RefreshFlatBuf();
+        out.ps.hash = ps_params.hash;
+        FillBindings(ps_info, out.ps);
+        mrt_mask = ps_info.mrt_mask;
     }
-    ps_info.RefreshFlatBuf();
-    out.ps.hash = ps_params.hash;
-    FillBindings(ps_info, out.ps);
 
     // PipelineCache::BuildRuntimeInfo, vertex stage.
     Shader::RuntimeInfo vs_runtime{};
@@ -594,8 +628,8 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
     auto& sw_vs = vs_runtime.sw.vs;
     sw_vs.step_rate_0 = regs.vgt_instance_step_rate_0;
     sw_vs.step_rate_1 = regs.vgt_instance_step_rate_1;
-    sw_vs.vertex_sgpr_offset = 0;
-    sw_vs.instance_sgpr_offset = 0;
+    sw_vs.vertex_sgpr_offset = vertex_sgpr_offset;
+    sw_vs.instance_sgpr_offset = instance_sgpr_offset;
     sw_vs.tess_emulated_primitive = regs.primitive_type == AmdGpu::PrimitiveType::RectList ||
                                     regs.primitive_type == AmdGpu::PrimitiveType::QuadList;
 
@@ -664,9 +698,10 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
         using Shader::Backend::SPIRV::AuxShaderType;
         out.patch_points = is_rect_list ? 3 : 4;
         out.tcs_spirv = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
-            is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS, fs);
-        out.tes_spirv =
-            Shader::Backend::SPIRV::EmitAuxilaryTessShader(AuxShaderType::PassthroughTES, fs);
+            is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS,
+            ps_runtime.hw.fs);
+        out.tes_spirv = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
+            AuxShaderType::PassthroughTES, ps_runtime.hw.fs);
     }
     out.polygon_mode = u32(Vulkan::LiverpoolToVK::PolygonMode(regs.polygon_control.PolyMode()));
     out.depth_clip = regs.clipper_control.ZclipEnable();
@@ -775,7 +810,6 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
     out.blend_constants = regs.blend_constants;
     out.logic_op_enable = regs.color_control.rop3 != AmdGpu::ColorControl::LogicOp::Copy;
     out.logic_op = u32(Vulkan::LiverpoolToVK::LogicOp(regs.color_control.rop3));
-    const u32 mrt_mask = ps_info.mrt_mask;
     const u32 num_attachments = std::bit_width(mrt_mask);
     out.colors.resize(num_attachments);
     out.width = 16384;
@@ -972,6 +1006,21 @@ bool TranslateDraw(const DrawState& state, const u32* packet, TranslatedDraw& ou
         }
         if (fetch.instance_offset_sgpr != -1) {
             out.instance_offset = vs_info.UserData()[fetch.instance_offset_sgpr];
+        }
+    }
+    if (indirect) {
+        // The arguments replace the registers' (DrawIndirectRecord: the index buffer starts at
+        // INDEX_BASE, the command's first index moves into it here).
+        const auto& args = state.indirect_args;
+        out.count = args[0];
+        out.instances = args[1];
+        if (out.indexed) {
+            index_offset = args[2];
+            out.vertex_offset = args[3]; // s32 in the command, kept as its bits
+            out.instance_offset = args[4];
+        } else {
+            out.vertex_offset = args[2];
+            out.instance_offset = args[3];
         }
     }
     if (out.indexed) {

@@ -186,6 +186,11 @@ struct DrawState {
     std::vector<u32> regs;
     std::array<u32, 8> cb_extent{};
     u32 db_extent = 0;
+    // An indirect draw's arguments, read from game memory (the GPU writes them, culling on the
+    // GPU): VkDrawIndirectCommand (DRAW_INDIRECT, 4 dwords) or VkDrawIndexedIndirectCommand
+    // (DRAW_INDEX_INDIRECT, 5 dwords), at the SET_BASE address + the packet's data offset.
+    bool indirect = false;
+    std::array<u32, 5> indirect_args{};
 };
 
 // A vertex attribute, from the fetch shader the vertex shader calls and the V# it reads (one

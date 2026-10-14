@@ -873,7 +873,7 @@ void CheckState(u64 address, bool dispatch, bool indirect = false, bool compute_
         // The native renderer runs the same dispatch from this state (before the GPU layer does).
         ValidateDispatchBefore(snapshot, reinterpret_cast<const u32*>(address), indirect,
                                compute_queue);
-    } else if (!dispatch && !indirect && NativeValidationEnabled()) {
+    } else if (!dispatch && NativeValidationEnabled()) {
         ValidateDrawBefore(snapshot, reinterpret_cast<const u32*>(address));
     }
     std::scoped_lock lock{g_proof_mutex};

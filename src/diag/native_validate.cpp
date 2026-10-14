@@ -669,6 +669,25 @@ void ValidateDrawBefore(const render::RegisterSnapshot& snapshot, const u32* pac
     }
     stats.attempts++;
     g_draw_model_registers = from_model;
+    // An indirect draw: its arguments, as the GPU (often a culling shader) left them in memory
+    // at the SET_BASE address + the packet's data offset (DRAW_INDIRECT: 4 dwords,
+    // DRAW_INDEX_INDIRECT: 5).
+    if (const u32 op = (packet[0] >> 8) & 0xff; op == 0x24 || op == 0x25) {
+        const u64 args = gpu::ReadIndirectArgsAddress() + packet[1];
+        const u64 size = op == 0x25 ? 20 : 16;
+        gpu::SyncGuestRange(args, size);
+        if (!ReadMirror(args, state.indirect_args.data(), size)) {
+            stats.error = std::format("could not read the indirect arguments at {:#x}", args);
+            return;
+        }
+        state.indirect = true;
+        if (!state.indirect_args[0] || !state.indirect_args[1]) {
+            // Culled to nothing (no vertices or no instances): there is nothing to compare, and
+            // it is no skip either; a later draw of the pair takes the attempt.
+            stats.attempts--;
+            return;
+        }
+    }
 
     render::NativeDrawResult result;
     result.compare_inputs = settings.dump;
@@ -693,7 +712,7 @@ void ValidateDrawBefore(const render::RegisterSnapshot& snapshot, const u32* pac
         return gpu::ReadLayerStencil(binding, out.data(), why);
     };
     render::RunNativeDraw(state, packet, read, read_image, read_stencil, fast_cleared, result);
-    if (settings.dump && !result.draw.ps.spirv.empty() && result.skipped.empty()) {
+    if (settings.dump && !result.draw.vs.spirv.empty() && result.skipped.empty()) {
         // Marks the place in the log: what the GPU layer logs next is about this draw.
         LOG_INFO("Validate", "native draw vs {:016x} ps {:016x} attempt {} dumped", vs_hash,
                  ps_hash, stats.attempts);

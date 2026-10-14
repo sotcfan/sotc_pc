@@ -80,11 +80,14 @@ void RunOnce(const translate::DrawState& state, const u32* packet, const GuestRe
             return;
         }
     }
-    // The pixel shader's bindings come first (PipelineCache::RefreshGraphicsStages).
-    const std::array<ResourceSet::Stage, 2> stages = {{
-        {&draw.ps, VK_SHADER_STAGE_FRAGMENT_BIT},
-        {&draw.vs, VK_SHADER_STAGE_VERTEX_BIT},
-    }};
+    // The pixel shader's bindings come first (PipelineCache::RefreshGraphicsStages); a
+    // depth-only draw has none.
+    const bool has_ps = !draw.ps.spirv.empty();
+    std::vector<ResourceSet::Stage> stages;
+    if (has_ps) {
+        stages.push_back({&draw.ps, VK_SHADER_STAGE_FRAGMENT_BIT});
+    }
+    stages.push_back({&draw.vs, VK_SHADER_STAGE_VERTEX_BIT});
     result.skipped = ResourceSet::Unsupported(stages);
     if (!result.skipped.empty()) {
         return;
@@ -119,6 +122,24 @@ void RunOnce(const translate::DrawState& state, const u32* packet, const GuestRe
     std::vector<VkFormat> formats(draw.colors.size(), VK_FORMAT_UNDEFINED);
     std::vector<VkPipelineColorBlendAttachmentState> blends(draw.colors.size());
     u32 layers = 1;
+    // Targets on the same memory with the same layout per layer are one image (e.g. the layers
+    // of an array, each bound as a target of its own; each describes the array only up to its
+    // own layer): one native image too, the description with the most layers, a view per target.
+    std::vector<std::pair<const translate::ImageBinding*, PreparedImage*>> target_images;
+    const auto same_image = [](const translate::ImageBinding& a, const translate::ImageBinding& b) {
+        return a.address == b.address && a.vk_format == b.vk_format && a.extent == b.extent &&
+               a.levels == b.levels && a.num_bits == b.num_bits;
+    };
+    const auto widest = [&](const translate::ImageBinding& binding) {
+        const translate::ImageBinding* best = &binding;
+        for (const auto& other : draw.colors) {
+            if (other.used && same_image(other.image, binding) &&
+                other.image.layers > best->layers) {
+                best = &other.image;
+            }
+        }
+        return best;
+    };
     for (size_t i = 0; i < draw.colors.size(); i++) {
         const translate::ColorTarget& target = draw.colors[i];
         attachments[i] = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -126,11 +147,21 @@ void RunOnce(const translate::DrawState& state, const u32* packet, const GuestRe
         if (!target.used) {
             continue;
         }
-        PreparedImage* image = resources.AddImage(
-            target.image, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, true,
-            nullptr, result, result.error);
+        PreparedImage* image = nullptr;
+        for (const auto& [binding, prepared] : target_images) {
+            if (same_image(*binding, target.image)) {
+                image = prepared;
+            }
+        }
         if (!image) {
-            return;
+            const translate::ImageBinding* binding = widest(target.image);
+            image = resources.AddImage(
+                *binding, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, true,
+                nullptr, result, result.error);
+            if (!image) {
+                return;
+            }
+            target_images.emplace_back(binding, image);
         }
         const VkImageViewCreateInfo view_info{
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -224,12 +255,12 @@ void RunOnce(const translate::DrawState& state, const u32* packet, const GuestRe
 
     // --- pipeline (GraphicsPipeline's, with the draw's dynamic state baked in) ------------------
     const VkShaderModule vs = Module(*device, objects, draw.vs.spirv);
-    const VkShaderModule ps = Module(*device, objects, draw.ps.spirv);
+    const VkShaderModule ps = has_ps ? Module(*device, objects, draw.ps.spirv) : VK_NULL_HANDLE;
     const VkShaderModule tcs =
         draw.patch_points ? Module(*device, objects, draw.tcs_spirv) : VK_NULL_HANDLE;
     const VkShaderModule tes =
         draw.patch_points ? Module(*device, objects, draw.tes_spirv) : VK_NULL_HANDLE;
-    if (!vs || !ps || (draw.patch_points && (!tcs || !tes))) {
+    if (!vs || (has_ps && !ps) || (draw.patch_points && (!tcs || !tes))) {
         result.error = "could not create a shader module";
         return;
     }
@@ -253,7 +284,9 @@ void RunOnce(const translate::DrawState& state, const u32* packet, const GuestRe
         add_stage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, tcs);
         add_stage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, tes);
     }
-    add_stage(VK_SHADER_STAGE_FRAGMENT_BIT, ps);
+    if (has_ps) {
+        add_stage(VK_SHADER_STAGE_FRAGMENT_BIT, ps);
+    }
 
     const VkPushConstantRange push_range{
         .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS,
