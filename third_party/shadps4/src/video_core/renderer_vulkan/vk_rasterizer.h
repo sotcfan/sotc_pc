@@ -192,6 +192,9 @@ private:
     bool shadow_dispatch = false; ///< the dispatch being recorded was shadowed on the CPU
     VAddr shadow_verify_address = 0;          ///< SOTC_VERIFY_SHADOW_COPY: copy to compare
     std::vector<u32> shadow_verify_expected;  ///< what the CPU computed for it
+    VAddr shadow_verify_src = 0;              ///< its source and period, for the report
+    u32 shadow_verify_period = 0;
+    std::string shadow_verify_info;
     bool next_packet_shadowed = false; ///< stage A: the packet about to be posted was
     void MaybeFlushEarly();
     u32 work_since_flush = 0; ///< draws and dispatches recorded since the last early flush

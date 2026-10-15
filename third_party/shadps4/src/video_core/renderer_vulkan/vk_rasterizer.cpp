@@ -726,9 +726,24 @@ void Rasterizer::VerifyShadowCopy() {
             ++mismatches;
             const auto first =
                 std::ranges::mismatch(gpu, shadow_verify_expected).in1 - gpu.begin();
-            LOG_ERROR(Render, "shadow copy at {:#x}: GPU {:#x} / CPU {:#x} at dword {} of {}",
+            u64 differing = 0;
+            for (size_t i = 0; i < gpu.size(); ++i) {
+                differing += gpu[i] != shadow_verify_expected[i];
+            }
+            // The source dword behind it, as the CPU and the GPU see it now.
+            const VAddr src_dword =
+                shadow_verify_src + (first % std::max<u32>(shadow_verify_period, 1)) * 4;
+            u32 src_cpu = 0, src_gpu = 0;
+            memory->CopySparseMemory(src_dword, reinterpret_cast<u8*>(&src_cpu), 4);
+            const bool src_peeked =
+                buffer_cache.PeekGpuMemory(src_dword, 4, reinterpret_cast<u8*>(&src_gpu));
+            LOG_ERROR(Render,
+                      "shadow copy at {:#x}: GPU {:#x} / CPU {:#x} at dword {} of {} ({} differ); "
+                      "source dword {:#x}: CPU {:#x} / GPU {}; {}",
                       shadow_verify_address, gpu[first], shadow_verify_expected[first], first,
-                      gpu.size());
+                      gpu.size(), differing, src_dword, src_cpu,
+                      src_peeked ? fmt::format("{:#x}", src_gpu) : std::string{"?"},
+                      shadow_verify_info);
         }
         if (verified % 100 == 0) {
             LOG_INFO(Render, "shadow copies verified: {}, {} differed", verified, mismatches);
@@ -752,14 +767,22 @@ void Rasterizer::VerifyShadowCopy() {
 // SOTC_NO_SHADOW_COPY=1 turns it off (A/B measurements).
 bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     constexpr u64 FillCopyShaderHash = 0x50784801;
-    static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr;
+    // sotcport: off by default since 2026-10-14: after the bridge cutscene before the last
+    // colossus, groups of objects (plants, rocks, trees) blinked in and out with it on and
+    // stayed with it off (F7 sequence in the player's game). SOTC_SHADOW_COPY=1 turns it on
+    // until the cause is known (SOTC_VERIFY_SHADOW_COPY=1 there).
+    static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr ||
+                                 std::getenv("SOTC_SHADOW_COPY") == nullptr;
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     if (disabled || diag::On(diag::ShadowCopyOff) || cs.pgm_hash != FillCopyShaderHash) {
         return false;
     }
-    // SOTC_VERIFY_SHADOW_COPY=1 (diagnostics): every 7th one is compared with what the GPU
-    // writes (VerifyShadowCopy).
-    static const bool verify = std::getenv("SOTC_VERIFY_SHADOW_COPY") != nullptr;
+    // SOTC_VERIFY_SHADOW_COPY=<n> (diagnostics): every n-th one (1: all) is compared with what
+    // the GPU writes (VerifyShadowCopy).
+    static const u32 verify_interval = [] {
+        const char* env = std::getenv("SOTC_VERIFY_SHADOW_COPY");
+        return env ? std::max<u32>(1, static_cast<u32>(std::strtoul(env, nullptr, 10))) : 0u;
+    }();
     static u32 verify_counter = 0;
     std::array<const Shader::BufferResource*, 3> descs{};
     u32 found = 0;
@@ -835,9 +858,18 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     }
     memory->TryWriteBacking(reinterpret_cast<void*>(dst_address), result.data(), dst_bytes);
     perf::NoteShadowCopy(dst_bytes); // sotcport TEMP
-    if (verify && (verify_counter++ % 7) == 0) {
+    if (verify_interval && (verify_counter++ % verify_interval) == 0) {
         shadow_verify_address = dst_address;
         shadow_verify_expected.assign(result.begin(), result.end());
+        shadow_verify_src = src_address;
+        shadow_verify_period = period;
+        shadow_verify_info = fmt::format(
+            "control {:#x} (count {}, period {}), source {:#x} ({} bytes{}), dispatch {}x64",
+            ctl.base_address, control[0], period, src_address, src_bytes,
+            texture_cache.FindImageFromRange(src_address, src_bytes, false)
+                ? ", inside a cached image"
+                : "",
+            program.dim_x);
     }
     return true;
 }
