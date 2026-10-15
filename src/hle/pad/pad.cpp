@@ -3,8 +3,12 @@
 // lies flat and still and the touch pad is never touched, but its button works.
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <unordered_set>
 
+#include "common/log.h"
 #include "common/types.h"
 #include "hle/registry.h"
 #include "input/input.h"
@@ -94,6 +98,25 @@ void FillState(PadData* data) {
                           .count();
 }
 
+// SOTC_LOG_PAD_CALLERS=1: logs every place of the game's code that reads the controller (once
+// per place) and the buffer it reads into. The starting point for finding the game's own input
+// code (src/input/game_hooks.cpp). `caller` is where the game's call returns to: the call
+// instruction is just before it. Imports reach these functions with a jump, so the return
+// address on entry is still the game's.
+void LogCaller(const char* function, const void* caller, const PadData* data) {
+    static const bool enabled = std::getenv("SOTC_LOG_PAD_CALLERS") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::unordered_set<const void*> seen;
+    std::scoped_lock lock{mutex};
+    if (seen.insert(caller).second) {
+        LOG_INFO("Pad", "{} called from {} (returns to), into the buffer at {}", function, caller,
+                 static_cast<const void*>(data));
+    }
+}
+
 PS4_SYSV_ABI s32 scePadInit() {
     return 0;
 }
@@ -114,6 +137,7 @@ PS4_SYSV_ABI s32 scePadReadState(s32 handle, PadData* data) {
     if (!data) {
         return ErrorInvalidArgument;
     }
+    LogCaller("scePadReadState", __builtin_return_address(0), data);
     FillState(data);
     return 0;
 }
@@ -126,6 +150,7 @@ PS4_SYSV_ABI s32 scePadRead(s32 handle, PadData* data, s32 count) {
     if (!data || count < 1) {
         return ErrorInvalidArgument;
     }
+    LogCaller("scePadRead", __builtin_return_address(0), data);
     FillState(data);
     return 1;
 }

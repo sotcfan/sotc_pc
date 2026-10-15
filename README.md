@@ -112,10 +112,12 @@ it). Not available on Windows: thread dumps on request (use `--dump-after`), F11
 - `--data <folder>`: where saves and settings go.
 - `--trace <file>`: records, in order, the first call to each Sony function.
 
-Controls: a gamepad (SDL3, buttons by position) or the keyboard: WASD left stick, arrow keys
-right stick, Space/Enter ✕, Backspace/F ○, E △, Q □, Shift R1, Ctrl L1, C R2, Z L2, B R3,
-V L3, I J K L directional buttons, Esc Options, Tab touchpad. F9 writes a marker into the log
-and saves a screenshot.
+Controls: a gamepad (SDL3, buttons by position) or keyboard and mouse. Click in the window to
+capture the mouse (it turns the camera); F1 or Esc releases it (Esc also opens the pause menu).
+Keyboard and mouse bindings are in `controls.ini` in the data folder, written with the defaults on
+the first run (WASD move, Left Alt walk, mouse/arrows camera, Space ✕, left button □, right
+button R2...); delete it to get the defaults back. F9 writes a marker into the log and saves a
+screenshot.
 
 Environment variables (frame limiter, performance switches, diagnostics): see
 [OPTIONS.md](OPTIONS.md). For play, `SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1` is a good start: a

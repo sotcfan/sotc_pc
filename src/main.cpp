@@ -25,6 +25,8 @@
 #include "hle/kernel/filesystem.h"
 #include "hle/savedata/savedata.h"
 #include "gpu/gpu.h"
+#include "input/game_hooks.h"
+#include "input/input.h"
 #include "loader/crash.h"
 #include "loader/game_version.h"
 #include "loader/linker.h"
@@ -163,6 +165,7 @@ int main(int argc, char** argv) {
         LOG_INFO("Main", "options:{}", options_text.empty() ? " (none)" : options_text);
         hle::kernel::InitializeFilesystem(std::filesystem::absolute(game_dir), data_dir);
         hle::savedata::Initialize(data_dir);
+        input::LoadControls(data_dir.string().c_str()); // controls.ini, before the window opens
 
         if (!loader::CheckGameVersion(game_dir / "eboot.bin")) {
             return 1;
@@ -182,6 +185,7 @@ int main(int argc, char** argv) {
         diag::InstallCopyWatch();    // SOTC_WATCH_COPIES
         diag::InstallPacketStats();  // SOTC_PACKET_STATS
         diag::InstallMemoryTypes();  // SOTC_MEMORY_TYPES
+        input::InstallGameHooks();   // split actions (src/input/game_hooks.cpp)
         linker.Link(eboot);
         linker.Start(eboot, game_args);
         RunMainLoop(dump_after_seconds);
