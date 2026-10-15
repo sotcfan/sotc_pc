@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "common/log.h"
+#include "input/input.h"
 #include "common/types.h"
 #include "hle/kernel/filesystem.h"
 #include "hle/registry.h"
@@ -384,6 +385,9 @@ PS4_SYSV_ABI s32 sceSaveDataMount2(const Mount2* mount, MountResult* result) {
     LOG_INFO("Saves", "\"{}\" mounted at {} ({}{}, mode {:#x})", name, mount_point,
              read_only ? "read-only" : "read-write", exists ? "" : ", just created",
              mount->mode);
+    if (read_only && name.find("Progress") != std::string::npos) {
+        input::NoteSaveLoaded(); // a controller replay starts here
+    }
     return 0;
 }
 

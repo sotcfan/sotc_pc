@@ -136,6 +136,8 @@ bool Liverpool::PipelinedOpcode(PM4ItOpcode opcode, const u32* packet) {
     case PM4ItOpcode::WaitOnCeCounter:
     case PM4ItOpcode::EventWriteEop: // signalled by stage B (or drains in OnFence)
     case PM4ItOpcode::WaitRegMem:    // drains in WaitRegMemMet when needed
+    case PM4ItOpcode::WriteData:     // written by stage B (or drains in OnFence)
+    case PM4ItOpcode::GetLodStats:   // answered by stage B, if at all (Rasterizer::GetLodStats)
         return true;
     case PM4ItOpcode::EventWriteEos: // label writes: signalled by stage B (or drain in OnFence)
         return reinterpret_cast<const PM4CmdEventWriteEos*>(packet)->command ==
@@ -231,6 +233,7 @@ void Liverpool::SignalEopFence(const PM4CmdEventWriteEop& packet) {
         [](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
             ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+            perf::NoteLabelWrite(reinterpret_cast<u64>(address), num_bytes); // sotcport TEMP
         },
         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
 }
@@ -1006,6 +1009,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 event_eos->SignalFence([](void* address, u64 data, u32 num_bytes) {
                     auto* memory = Core::Memory::Instance();
                     ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                    perf::NoteLabelWrite(reinterpret_cast<u64>(address), num_bytes); // sotcport TEMP
                 });
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
@@ -1088,10 +1092,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 diag::NoteMemoryAccess(diag::MemAccess::Label, reinterpret_cast<u64>(address),
                                        data_size); // sotcport (SOTC_MEMORY_TYPES)
                 if (!write_data->wr_one_addr.Value()) {
-                    if (rasterizer) {
-                        rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceWriteData);
+                    // sotcport: stage B writes it in order when it can (PostWriteData).
+                    if (!rasterizer ||
+                        !rasterizer->PostWriteData(reinterpret_cast<VAddr>(address),
+                                                   write_data->data, data_size)) {
+                        if (rasterizer) {
+                            rasterizer->OnFence(Vulkan::DrawPipe::ReasonFenceWriteData);
+                        }
+                        std::memcpy(address, write_data->data, data_size);
                     }
-                    std::memcpy(address, write_data->data, data_size);
                 } else {
                     UNREACHABLE();
                 }

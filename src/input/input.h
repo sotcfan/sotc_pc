@@ -54,4 +54,8 @@ PadState Read();
 void SetVibration(std::uint8_t large_motor, std::uint8_t small_motor);
 void SetLightBar(std::uint8_t red, std::uint8_t green, std::uint8_t blue);
 
+// A progress save was loaded: where a controller recording and its replay line up (see
+// SOTC_INPUT_RECORD in input.cpp).
+void NoteSaveLoaded();
+
 } // namespace input

@@ -744,6 +744,12 @@ void Rasterizer::VerifyShadowCopy() {
                       gpu.size(), differing, src_dword, src_cpu,
                       src_peeked ? fmt::format("{:#x}", src_gpu) : std::string{"?"},
                       shadow_verify_info);
+            LOG_ERROR(Render, "  source page CPU-modified: {}, GPU-modified: {}; label writes in "
+                              "the source:{}",
+                      buffer_cache.IsRegionCpuModified(src_dword, 4),
+                      buffer_cache.IsRegionGpuModified(src_dword, 4),
+                      perf::DescribeLabelWrites(shadow_verify_src,
+                                                shadow_verify_src + shadow_verify_bytes));
         }
         if (verified % 100 == 0) {
             LOG_INFO(Render, "shadow copies verified: {}, {} differed", verified, mismatches);
@@ -863,6 +869,7 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
         shadow_verify_expected.assign(result.begin(), result.end());
         shadow_verify_src = src_address;
         shadow_verify_period = period;
+        shadow_verify_bytes = src_bytes;
         shadow_verify_info = fmt::format(
             "control {:#x} (count {}, period {}), source {:#x} ({} bytes{}), dispatch {}x64",
             ctl.base_address, control[0], period, src_address, src_bytes,
@@ -1419,6 +1426,38 @@ void Rasterizer::WriteLodStats(VAddr base, u32 size) {
     }
 }
 
+bool Rasterizer::PostWriteData(VAddr address, const void* data, u32 bytes) {
+    // WRITE_DATA (about one per frame) used to drain stage B before writing: ~60 ms a second of
+    // the GPU command thread in the forest. Like a fence, it is written by stage B in order with
+    // the packets; until then its bytes count as a pending write for stage A. Written with a
+    // plain copy, as before: a page a cache watches faults and is invalidated (handled inline on
+    // stage B). SOTC_SYNC_WRITE_DATA=1 drains as before (A/B).
+    static const bool sync = std::getenv("SOTC_SYNC_WRITE_DATA") != nullptr;
+    constexpr u32 MaxBytes = 256;
+    if (sync || bytes > MaxBytes || !PostFencesOnStageB()) {
+        return false;
+    }
+    NotePendingWrite(address, bytes);
+    struct Payload {
+        VAddr address;
+        u32 bytes;
+        u8 data[MaxBytes];
+    } payload;
+    payload.address = address;
+    payload.bytes = bytes;
+    std::memcpy(payload.data, data, bytes);
+    PostTask(
+        [](Rasterizer& self, const u8* raw) {
+            Payload copy;
+            std::memcpy(&copy, raw, offsetof(Payload, data));
+            std::memcpy(copy.data, raw + offsetof(Payload, data), copy.bytes);
+            self.texture_cache.ProcessDownloadImages(); // what OnFence does on stage A
+            std::memcpy(reinterpret_cast<void*>(copy.address), copy.data, copy.bytes);
+        },
+        &payload, static_cast<u32>(offsetof(Payload, data) + bytes));
+    return true;
+}
+
 bool Rasterizer::PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet) {
     if (!PostFencesOnStageB()) {
         return false;
@@ -1432,6 +1471,7 @@ bool Rasterizer::PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet) {
             eos.SignalFence([](void* address, u64 data, u32 num_bytes) {
                 auto* memory = Core::Memory::Instance();
                 ASSERT(memory->TryWriteBacking(address, &data, num_bytes));
+                perf::NoteLabelWrite(reinterpret_cast<u64>(address), num_bytes); // sotcport TEMP
             });
         },
         &packet, sizeof(packet));

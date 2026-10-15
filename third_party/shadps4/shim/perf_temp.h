@@ -63,6 +63,10 @@ void NoteDownload(uint64_t address, const uint8_t* data, uint64_t size);
 // ('M' mapped, 'U' unmapped, 'P' protection changed), and the ones touching [begin, end) as
 // text, with how long ago they happened.
 void NoteMapEvent(char kind, uint64_t address, uint64_t size);
+// SOTC_VERIFY_SHADOW_COPY (diagnostics): fence/label writes done on the CPU side only (the GPU's
+// copy of that memory does not get them), and the ones in [begin, end) as text.
+void NoteLabelWrite(uint64_t address, uint64_t size);
+std::string DescribeLabelWrites(uint64_t begin, uint64_t end);
 std::string DescribeMapEvents(uint64_t begin, uint64_t end);
 
 struct Scope {

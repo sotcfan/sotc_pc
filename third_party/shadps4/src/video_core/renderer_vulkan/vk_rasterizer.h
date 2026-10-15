@@ -89,6 +89,9 @@ public:
     bool PostEopFence(const AmdGpu::PM4CmdEventWriteEop& packet);
     /// sotcport: the same for an EVENT_WRITE_EOS label write.
     bool PostEosFence(const AmdGpu::PM4CmdEventWriteEos& packet);
+    /// sotcport: hands a graphics queue WRITE_DATA of `bytes` at `address` to stage B, which
+    /// writes it in order with the packets. False when the caller has to drain and write it.
+    bool PostWriteData(VAddr address, const void* data, u32 bytes);
     /// sotcport: IT_GET_LOD_STATS of the graphics queue, for the LOD statistics buffer at `base`
     /// of `size` bytes (see WriteLodStats). Runs on stage B in order with the packets.
     void GetLodStats(VAddr base, u32 size);
@@ -194,6 +197,7 @@ private:
     std::vector<u32> shadow_verify_expected;  ///< what the CPU computed for it
     VAddr shadow_verify_src = 0;              ///< its source and period, for the report
     u32 shadow_verify_period = 0;
+    u64 shadow_verify_bytes = 0;
     std::string shadow_verify_info;
     bool next_packet_shadowed = false; ///< stage A: the packet about to be posted was
     void MaybeFlushEarly();

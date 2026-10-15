@@ -17,7 +17,8 @@
 # cache and the screenshots, stays the player's: it does not follow --data). SOTC_BENCH_SLOT=<n> makes save slot n (SAVEDATA0ShadowProgress<n>) the
 # most recent one, the one "Continue" loads (the game sorts the saves by the time of
 # sce_sys/param.bin).
-# SOTC_BENCH_ROUTE=walk: instead of staying at the save point, walks out of it and runs across
+# SOTC_BENCH_ROUTE=forest: the 60 FPS benchmark (see below). SOTC_BENCH_ROUTE=walk: instead of
+# staying at the save point, walks out of it and runs across
 # the plain for two minutes (the 60 FPS goal is measured there), FPS measured from 80 to 190 s,
 # with frame time percentiles and the share of frames slower than 16.7 ms.
 #
@@ -57,7 +58,16 @@ shots="80,95,110"
 duration=120
 window_from=75
 window_to=115
-if [ "${SOTC_BENCH_ROUTE:-}" = walk ]; then
+if [ "${SOTC_BENCH_ROUTE:-}" = forest ]; then
+    # The player's save at the shrine of the Forest of Giants (2026-10-14, in the benchmark's
+    # saves.snapshot, slot 0): stand up (a tap), walk away from the shrine for 3.5 s, then turn
+    # the camera all the way round for 70 s, through the heaviest part of the game.
+    keys="$keys,75:S:0.3,77:S:3.5,82:Right:70"
+    shots="90,100,110,120,130,140,150"
+    duration=160
+    window_from=85
+    window_to=150
+elif [ "${SOTC_BENCH_ROUTE:-}" = walk ]; then
     # Out of the save point and across the plain: run, turn a little, run.
     keys="$keys,75:S:6,82:W:30,112:D:2,114:W:30,144:A:3,147:W:45"
     shots="100,130,160,190"
@@ -76,12 +86,10 @@ fi
 
 # SOTC_BENCH_SHOTS=<s,s,...> takes the screenshots at other times.
 shots=${SOTC_BENCH_SHOTS:-$shots}
-# With SOTC_INPUT_REPLAY=<file> (src/input/input.cpp) a recorded play drives the game, menus
-# included, instead of the keys above; SOTC_BENCH_DURATION=<s> and SOTC_BENCH_WINDOW=<from>-<to>
-# change how long it runs and which seconds are measured.
-if [ -n "${SOTC_INPUT_REPLAY:-}" ]; then
-    keys=""
-fi
+# With SOTC_INPUT_REPLAY=<file> (src/input/input.cpp) a recorded play drives the game from the
+# save load on (the keys above still go through the menus; leave SOTC_BENCH_ROUTE unset);
+# SOTC_BENCH_DURATION=<s> and SOTC_BENCH_WINDOW=<from>-<to> change how long it runs and which
+# seconds are measured.
 # SOTC_BENCH_KEYS=<script> adds keys to the script (for example "75:F7" for the diagnostic
 # sequence, src/input/input.cpp).
 keys="$keys${SOTC_BENCH_KEYS:+,$SOTC_BENCH_KEYS}"

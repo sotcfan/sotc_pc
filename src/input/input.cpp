@@ -20,12 +20,15 @@
 // SOTC_KEY_SCRIPT="20:Return,24.5:Return:0.3,60:W:30" presses keys by itself: seconds since the
 // start, SDL key name and, optionally, how long to hold it (0.15 s by default). For reaching a
 // scene and testing it without anyone at the keyboard.
-// SOTC_INPUT_RECORD=<file> writes down the controller state the game reads, and the F9 presses;
-// SOTC_INPUT_REPLAY=<file> plays such a recording back instead of the keyboard and controllers
-// (taking the screenshots at the recorded F9 presses). The clock is the count of the game's
-// controller reads, not seconds: the game reads it once per update, so a replay follows the game
-// whatever the frame rate. For reproducing a stretch of play (a cutscene reached on horseback)
-// as many times as a test needs.
+// SOTC_INPUT_RECORD=<file> writes down the controller state the game reads, the F9 presses and
+// when a progress save was loaded; SOTC_INPUT_REPLAY=<file> plays such a recording back from
+// that load on, instead of the keyboard and controllers (taking the screenshots at the recorded
+// F9 presses). The clock is the count of the game's controller reads, not seconds: the game
+// reads it once per update, so a replay follows the game whatever the frame rate. Before the
+// load (the menus) the replay does nothing: the game boots at its own pace and the controller
+// reads there do not line up, so the menus are left to SOTC_KEY_SCRIPT (tools/bench_game.sh).
+// SOTC_INPUT_REPLAY_ANCHOR=<read> gives the load's read for a recording made without the LOAD
+// line. For reproducing a stretch of play on foot (on horseback it drifts off, 2026-10-14).
 // Controllers go through SDL's gamepad mapping, by button position: the bottom face button is
 // Cross on any brand, Start is Options and Back (or a touch pad) is the touch pad button.
 
@@ -38,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
 #include <string>
 #include <utility>
 #include <mutex>
@@ -113,6 +117,11 @@ std::vector<ReplayEvent> g_replay;
 std::size_t g_replay_next = 0;
 bool g_replaying = false;
 PadState g_replay_state;
+std::uint64_t g_recorded_load = 0;         // the recording's read at the save load (0: none)
+std::int64_t g_replay_offset = 0;          // live read - recorded read, once loaded
+bool g_replay_live = false;                // the save was loaded: the replay drives the pad
+bool g_record_loaded = false;
+const auto g_start = std::chrono::steady_clock::now();
 
 // F7: the diagnostic sequence (see the top of the file).
 struct DiagPhase {
@@ -199,6 +208,12 @@ void OpenRecording() {
             ReplayEvent event{};
             unsigned long long read = 0;
             unsigned buttons = 0, lx = 0, ly = 0, rx = 0, ry = 0, l2 = 0, r2 = 0;
+            if (std::strstr(line, "LOAD") && std::sscanf(line, "%llu", &read) == 1) {
+                if (g_recorded_load == 0) {
+                    g_recorded_load = read;
+                }
+                continue;
+            }
             if (std::strstr(line, "F9") && std::sscanf(line, "%llu", &read) == 1) {
                 event.read = read;
                 event.screenshot = true;
@@ -218,8 +233,18 @@ void OpenRecording() {
             g_replay.push_back(event);
         }
         std::fclose(file);
+        if (const char* anchor = std::getenv("SOTC_INPUT_REPLAY_ANCHOR")) {
+            g_recorded_load = std::strtoull(anchor, nullptr, 10);
+        }
+        // What came before the load (the menus) is not replayed.
+        std::erase_if(g_replay, [](const ReplayEvent& event) {
+            return g_recorded_load != 0 && event.read < g_recorded_load;
+        });
         g_replaying = true;
-        LOG_INFO("Input", "replaying {} controller events from {}", g_replay.size(), path);
+        g_replay_live = g_recorded_load == 0; // an old recording without a load: from the start
+        LOG_INFO("Input", "replaying {} controller events from {}{}", g_replay.size(), path,
+                 g_recorded_load ? std::format(", from the save load (read {})", g_recorded_load)
+                                 : std::string{});
     }
 }
 
@@ -231,13 +256,19 @@ void RecordOrReplay() {
     if (g_record && (!g_recorded_any || !SameState(g_state, g_recorded))) {
         g_recorded = g_state;
         g_recorded_any = true;
-        std::fprintf(g_record, "%llu %x %u %u %u %u %u %u\n",
+        // The last column (milliseconds since start) is for reading the file; replays ignore it.
+        std::fprintf(g_record, "%llu %x %u %u %u %u %u %u %lld\n",
                      static_cast<unsigned long long>(g_reads), g_state.buttons, g_state.left_x,
-                     g_state.left_y, g_state.right_x, g_state.right_y, g_state.l2, g_state.r2);
+                     g_state.left_y, g_state.right_x, g_state.right_y, g_state.l2, g_state.r2,
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - g_start)
+                                                .count()));
         std::fflush(g_record);
     }
-    if (g_replaying) {
-        while (g_replay_next < g_replay.size() && g_replay[g_replay_next].read <= g_reads) {
+    if (g_replaying && g_replay_live) {
+        while (g_replay_next < g_replay.size() &&
+               static_cast<std::int64_t>(g_replay[g_replay_next].read) + g_replay_offset <=
+                   static_cast<std::int64_t>(g_reads)) {
             const ReplayEvent& event = g_replay[g_replay_next++];
             if (event.screenshot) {
                 static int markers = 0;
@@ -256,6 +287,14 @@ void RecordOrReplay() {
     }
 }
 bool g_keys[SDL_SCANCODE_COUNT] = {}; // keyboard keys held, window thread only
+// Keys SOTC_KEY_SCRIPT holds. Kept apart from the real keyboard: losing the window's focus
+// releases the real keys (their releases go to another window), and it released the
+// scripted ones too, which left a benchmark standing still (2026-10-14).
+bool g_script_keys[SDL_SCANCODE_COUNT] = {};
+
+bool KeyHeld(SDL_Scancode key) {
+    return g_keys[key] || g_script_keys[key];
+}
 std::vector<SDL_Gamepad*> g_gamepads; // open controllers, guarded by g_mutex
 
 std::uint8_t StickValue(Sint16 axis) {
@@ -275,10 +314,10 @@ void TakeStronger(std::uint8_t& current, std::uint8_t candidate) {
 
 // The stick position given by two opposite keys, or `fallback` if neither or both are held.
 std::uint8_t KeyAxis(SDL_Scancode negative, SDL_Scancode positive, std::uint8_t fallback) {
-    if (g_keys[negative] == g_keys[positive]) {
+    if (KeyHeld(negative) == KeyHeld(positive)) {
         return fallback;
     }
-    return g_keys[negative] ? 0x00 : 0xFF;
+    return KeyHeld(negative) ? 0x00 : 0xFF;
 }
 
 // Recomputes the state from the keyboard and the controllers. Called with g_mutex held.
@@ -299,7 +338,7 @@ void Update() {
     }
 
     for (const KeyButton& mapping : KeyButtons) {
-        if (g_keys[mapping.key]) {
+        if (KeyHeld(mapping.key)) {
             state.buttons |= mapping.button;
         }
     }
@@ -441,7 +480,7 @@ void RunScript() {
         const bool held = now >= entry.start && now < entry.end;
         if (held != entry.held) {
             entry.held = held;
-            g_keys[entry.key] = held;
+            g_script_keys[entry.key] = held;
             changed = true;
             if (held) {
                 OnToolKey(entry.key);
@@ -506,7 +545,22 @@ PadState Read() {
     RunScript();
     RecordOrReplay();
     RunDiagSequence();
-    return g_replaying ? g_replay_state : g_state;
+    return g_replaying && g_replay_live ? g_replay_state : g_state;
+}
+
+void NoteSaveLoaded() {
+    std::scoped_lock lock{g_mutex};
+    if (g_record && !g_record_loaded) {
+        g_record_loaded = true;
+        std::fprintf(g_record, "%llu LOAD\n", static_cast<unsigned long long>(g_reads));
+        std::fflush(g_record);
+    }
+    if (g_replaying && !g_replay_live) {
+        g_replay_live = true;
+        g_replay_offset = static_cast<std::int64_t>(g_reads) -
+                          static_cast<std::int64_t>(g_recorded_load);
+        LOG_INFO("Input", "save loaded at read {}: the controller replay starts", g_reads);
+    }
 }
 
 void SetVibration(std::uint8_t large_motor, std::uint8_t small_motor) {

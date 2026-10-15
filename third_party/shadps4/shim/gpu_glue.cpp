@@ -536,6 +536,37 @@ std::string DescribeMapEvents(uint64_t begin, uint64_t end) {
     return text.empty() ? " none" : text;
 }
 
+namespace {
+std::array<MapEvent, MapEventCount> g_label_writes;
+std::atomic<uint32_t> g_label_write_next{0};
+} // namespace
+
+void NoteLabelWrite(uint64_t address, uint64_t size) {
+    static const bool enabled = std::getenv("SOTC_VERIFY_SHADOW_COPY") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    MapEvent& event = g_label_writes[g_label_write_next.fetch_add(1) % MapEventCount];
+    event.address = address;
+    event.size = size;
+    event.time = Now();
+    event.kind = 'L';
+}
+
+std::string DescribeLabelWrites(uint64_t begin, uint64_t end) {
+    const uint64_t now = Now();
+    std::string text;
+    u32 shown = 0;
+    for (const MapEvent& event : g_label_writes) {
+        const uint64_t address = event.address;
+        const uint64_t size = event.size;
+        if (event.kind && address < end && begin < address + size && shown++ < 8) {
+            text += fmt::format(" {:#x}+{}@-{}ms", address, size, (now - event.time) / 1000000);
+        }
+    }
+    return text.empty() ? " none" : text;
+}
+
 void NoteDownload(uint64_t address, const uint8_t* data, uint64_t size) {
     if (!g_enabled) {
         return;
