@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -146,6 +147,20 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "error: sotcport is already running; close it first\n");
             return 1;
         }
+        // The options this run was started with, for reading a log later.
+        std::string options_text;
+#ifdef _WIN32
+        char** const environment = _environ;
+#else
+        char** const environment = environ;
+#endif
+        for (char** env = environment; *env; ++env) {
+            if (std::strncmp(*env, "SOTC_", 5) == 0 && std::strncmp(*env, "SOTC_GAME=", 10) != 0) {
+                options_text += ' ';
+                options_text += *env;
+            }
+        }
+        LOG_INFO("Main", "options:{}", options_text.empty() ? " (none)" : options_text);
         hle::kernel::InitializeFilesystem(std::filesystem::absolute(game_dir), data_dir);
         hle::savedata::Initialize(data_dir);
 

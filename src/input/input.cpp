@@ -9,6 +9,10 @@
 //   B                R3                         V             L3
 //   I J K L          directional buttons        Escape        Options
 //   Tab              touch pad button
+//   F7               diagnostic sequence: for ~4 s each, turns off one GPU layer optimization
+//                    after another (src/diag/toggles.h) and takes 12 screenshots, with
+//                    "DIAG PHASE" lines in the log (for finding which one causes a defect that
+//                    only shows in one place of the game; keep the camera still meanwhile)
 //   F9               writes a marker to the log and saves a screenshot (for finding a
 //                    moment of play later)
 //   F10              captures the frame in RenderDoc (when started with SOTC_RENDERDOC)
@@ -16,6 +20,12 @@
 // SOTC_KEY_SCRIPT="20:Return,24.5:Return:0.3,60:W:30" presses keys by itself: seconds since the
 // start, SDL key name and, optionally, how long to hold it (0.15 s by default). For reaching a
 // scene and testing it without anyone at the keyboard.
+// SOTC_INPUT_RECORD=<file> writes down the controller state the game reads, and the F9 presses;
+// SOTC_INPUT_REPLAY=<file> plays such a recording back instead of the keyboard and controllers
+// (taking the screenshots at the recorded F9 presses). The clock is the count of the game's
+// controller reads, not seconds: the game reads it once per update, so a replay follows the game
+// whatever the frame rate. For reproducing a stretch of play (a cutscene reached on horseback)
+// as many times as a test needs.
 // Controllers go through SDL's gamepad mapping, by button position: the bottom face button is
 // Cross on any brand, Start is Options and Back (or a touch pad) is the touch pad button.
 
@@ -25,13 +35,17 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <utility>
 #include <mutex>
 #include <vector>
 
 #include "common/log.h"
 #include "diag/access_sampling.h"
+#include "diag/toggles.h"
 #include "gpu/gpu.h"
 
 namespace input {
@@ -83,6 +97,164 @@ constexpr std::uint8_t TriggerButtonThreshold = 0x20;
 
 std::mutex g_mutex;
 PadState g_state;                     // what Read() returns
+
+// SOTC_INPUT_RECORD / SOTC_INPUT_REPLAY (see the top of the file). One line per change:
+// "<read> <buttons, hex> <lx> <ly> <rx> <ry> <l2> <r2>", or "<read> F9" for a screenshot.
+std::uint64_t g_reads = 0;            // controller reads so far (the recording's clock)
+std::FILE* g_record = nullptr;
+PadState g_recorded;                  // the last state written down
+bool g_recorded_any = false;
+struct ReplayEvent {
+    std::uint64_t read;
+    bool screenshot;
+    PadState state;
+};
+std::vector<ReplayEvent> g_replay;
+std::size_t g_replay_next = 0;
+bool g_replaying = false;
+PadState g_replay_state;
+
+// F7: the diagnostic sequence (see the top of the file).
+struct DiagPhase {
+    const char* name;
+    std::uint32_t toggles;
+};
+constexpr DiagPhase DiagPhases[] = {
+    {"as launched", 0},
+    {"shadow copies off", 1u << diag::ShadowCopyOff},
+    {"SRT patches off", 1u << diag::SrtPatchesOff},
+    {"bind memo off", 1u << diag::BindMemoOff},
+    {"target cache off", 1u << diag::TargetCacheOff},
+    {"texture lookup cache off", 1u << diag::TextureLookupOff},
+    {"all five off", (1u << diag::ShadowCopyOff) | (1u << diag::SrtPatchesOff) |
+                         (1u << diag::BindMemoOff) | (1u << diag::TargetCacheOff) |
+                         (1u << diag::TextureLookupOff)},
+    {"LOD statistics on", 1u << diag::LodStatsOn},
+    {"as launched again", 0},
+};
+constexpr double DiagPhaseSeconds = 4.0;
+constexpr double DiagSettleSeconds = 1.5; // before the first screenshot of a phase
+constexpr double DiagShotInterval = 0.2;
+constexpr int DiagShotsPerPhase = 12;
+bool g_diag_running = false;
+std::chrono::steady_clock::time_point g_diag_start;
+int g_diag_phase = -1;
+int g_diag_shots = 0;
+
+// Called with g_mutex held, at every controller read (the game reads it every update).
+void RunDiagSequence() {
+    if (!g_diag_running) {
+        return;
+    }
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - g_diag_start).count();
+    const int phase = static_cast<int>(elapsed / DiagPhaseSeconds);
+    if (phase >= static_cast<int>(std::size(DiagPhases))) {
+        diag::SetToggles(0);
+        g_diag_running = false;
+        LOG_INFO("Input", "==== DIAG sequence done ====");
+        return;
+    }
+    if (phase != g_diag_phase) {
+        g_diag_phase = phase;
+        g_diag_shots = 0;
+        diag::SetToggles(DiagPhases[phase].toggles);
+        LOG_INFO("Input", "==== DIAG PHASE {}: {} ====", phase, DiagPhases[phase].name);
+    }
+    const double in_phase = elapsed - phase * DiagPhaseSeconds;
+    if (g_diag_shots < DiagShotsPerPhase &&
+        in_phase >= DiagSettleSeconds + g_diag_shots * DiagShotInterval) {
+        ++g_diag_shots;
+        gpu::RequestScreenshot();
+    }
+}
+
+bool SameState(const PadState& a, const PadState& b) {
+    return a.buttons == b.buttons && a.left_x == b.left_x && a.left_y == b.left_y &&
+           a.right_x == b.right_x && a.right_y == b.right_y && a.l2 == b.l2 && a.r2 == b.r2;
+}
+
+void OpenRecording() {
+    if (const char* path = std::getenv("SOTC_INPUT_RECORD")) {
+        g_record = std::fopen(path, "w");
+        if (g_record) {
+            std::fprintf(g_record, "# sotcport input recording: <read> <buttons> <lx> <ly> <rx> "
+                                   "<ry> <l2> <r2> | <read> F9\n");
+            LOG_INFO("Input", "recording the controller to {}", path);
+        } else {
+            LOG_WARNING("Input", "cannot write {}", path);
+        }
+    }
+    if (const char* path = std::getenv("SOTC_INPUT_REPLAY")) {
+        std::FILE* file = std::fopen(path, "r");
+        if (!file) {
+            LOG_WARNING("Input", "cannot read {}", path);
+            return;
+        }
+        char line[256];
+        while (std::fgets(line, sizeof(line), file)) {
+            if (line[0] == '#') {
+                continue;
+            }
+            ReplayEvent event{};
+            unsigned long long read = 0;
+            unsigned buttons = 0, lx = 0, ly = 0, rx = 0, ry = 0, l2 = 0, r2 = 0;
+            if (std::strstr(line, "F9") && std::sscanf(line, "%llu", &read) == 1) {
+                event.read = read;
+                event.screenshot = true;
+            } else if (std::sscanf(line, "%llu %x %u %u %u %u %u %u", &read, &buttons, &lx, &ly,
+                                   &rx, &ry, &l2, &r2) == 8) {
+                event.read = read;
+                event.state = {buttons,
+                               static_cast<std::uint8_t>(lx),
+                               static_cast<std::uint8_t>(ly),
+                               static_cast<std::uint8_t>(rx),
+                               static_cast<std::uint8_t>(ry),
+                               static_cast<std::uint8_t>(l2),
+                               static_cast<std::uint8_t>(r2)};
+            } else {
+                continue;
+            }
+            g_replay.push_back(event);
+        }
+        std::fclose(file);
+        g_replaying = true;
+        LOG_INFO("Input", "replaying {} controller events from {}", g_replay.size(), path);
+    }
+}
+
+// Called with g_mutex held, once per controller read.
+void RecordOrReplay() {
+    static const bool opened = (OpenRecording(), true);
+    (void)opened;
+    ++g_reads;
+    if (g_record && (!g_recorded_any || !SameState(g_state, g_recorded))) {
+        g_recorded = g_state;
+        g_recorded_any = true;
+        std::fprintf(g_record, "%llu %x %u %u %u %u %u %u\n",
+                     static_cast<unsigned long long>(g_reads), g_state.buttons, g_state.left_x,
+                     g_state.left_y, g_state.right_x, g_state.right_y, g_state.l2, g_state.r2);
+        std::fflush(g_record);
+    }
+    if (g_replaying) {
+        while (g_replay_next < g_replay.size() && g_replay[g_replay_next].read <= g_reads) {
+            const ReplayEvent& event = g_replay[g_replay_next++];
+            if (event.screenshot) {
+                static int markers = 0;
+                LOG_INFO("Input", "==== MARKER {} (F9, replayed) ====", ++markers);
+                gpu::RequestScreenshot();
+            } else {
+                g_replay_state = event.state;
+            }
+        }
+        if (g_replay_next == g_replay.size() && !g_replay.empty()) {
+            static bool told = false;
+            if (!std::exchange(told, true)) {
+                LOG_INFO("Input", "controller replay finished at read {}", g_reads);
+            }
+        }
+    }
+}
 bool g_keys[SDL_SCANCODE_COUNT] = {}; // keyboard keys held, window thread only
 std::vector<SDL_Gamepad*> g_gamepads; // open controllers, guarded by g_mutex
 
@@ -185,8 +357,20 @@ void OnToolKey(SDL_Scancode key) {
         static int markers = 0;
         LOG_INFO("Input", "==== MARKER {} (F9) ====", ++markers);
         gpu::RequestScreenshot();
+        if (g_record) {
+            std::fprintf(g_record, "%llu F9\n", static_cast<unsigned long long>(g_reads));
+            std::fflush(g_record);
+        }
         break;
     }
+    case SDL_SCANCODE_F7:
+        if (!g_diag_running) {
+            g_diag_running = true;
+            g_diag_start = std::chrono::steady_clock::now();
+            g_diag_phase = -1;
+            LOG_INFO("Input", "==== DIAG sequence started (F7) ====");
+        }
+        break;
     case SDL_SCANCODE_F10:
         gpu::CaptureFrame();
         break;
@@ -320,7 +504,9 @@ void HandleEvent(const SDL_Event& event) {
 PadState Read() {
     std::scoped_lock lock{g_mutex};
     RunScript();
-    return g_state;
+    RecordOrReplay();
+    RunDiagSequence();
+    return g_replaying ? g_replay_state : g_state;
 }
 
 void SetVibration(std::uint8_t large_motor, std::uint8_t small_motor) {

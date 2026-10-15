@@ -76,6 +76,21 @@ fi
 
 # SOTC_BENCH_SHOTS=<s,s,...> takes the screenshots at other times.
 shots=${SOTC_BENCH_SHOTS:-$shots}
+# With SOTC_INPUT_REPLAY=<file> (src/input/input.cpp) a recorded play drives the game, menus
+# included, instead of the keys above; SOTC_BENCH_DURATION=<s> and SOTC_BENCH_WINDOW=<from>-<to>
+# change how long it runs and which seconds are measured.
+if [ -n "${SOTC_INPUT_REPLAY:-}" ]; then
+    keys=""
+fi
+# SOTC_BENCH_KEYS=<script> adds keys to the script (for example "75:F7" for the diagnostic
+# sequence, src/input/input.cpp).
+keys="$keys${SOTC_BENCH_KEYS:+,$SOTC_BENCH_KEYS}"
+keys=${keys#,}
+duration=${SOTC_BENCH_DURATION:-$duration}
+if [ -n "${SOTC_BENCH_WINDOW:-}" ]; then
+    window_from=${SOTC_BENCH_WINDOW%-*}
+    window_to=${SOTC_BENCH_WINDOW#*-}
+fi
 
 # The benchmark's own data folder (see above).
 data=${SOTC_BENCH_DATA:-$HOME/.local/share/sotcport-bench}

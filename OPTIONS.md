@@ -85,6 +85,9 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 
 | Variable | What it does |
 |---|---|
+| `SOTC_INPUT_RECORD=<file>` | Writes down the controller state the game reads (and the F9 presses), counted in the game's controller reads. |
+| `SOTC_INPUT_REPLAY=<file>` | Plays such a recording back instead of the keyboard and controllers, menus included, taking the screenshots at the recorded F9 presses: a stretch of play reproduced as many times as a test needs. |
+| F7 (key) | Diagnostic sequence: for ~4 s each, turns off one GPU layer optimization after another (shadow copies, SRT patches, bind memo, target cache, texture lookup cache, all of them, then LOD statistics on) and takes 12 screenshots per step, with `DIAG PHASE` lines in the log. For finding which one causes a defect that only shows in one place of the game; keep the camera still meanwhile. |
 | `SOTC_VERIFY_IMAGES=1` | Every 64th texture bound, checks that its memory still holds what its last upload read; logs the stale ones (memory changed without the texture cache noticing): which pages changed, the game's mappings there and its recent map/unmap events. Slows the game down. |
 | `SOTC_PERF=1` | Every 5 s, GPU layer counters in the log: time per kind of work, draws and dispatches per second, readbacks, write faults, draw pipeline stalls, frame pacing, VRAM in use. |
 | `SOTC_SPIKES=<ms>` | Logs every frame slower than `<ms>` with what its threads waited for (with `SOTC_PERF=1`). |

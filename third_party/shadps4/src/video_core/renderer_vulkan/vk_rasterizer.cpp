@@ -25,6 +25,7 @@
 #include <unordered_set>
 #include <xxhash.h>
 #include "perf_temp.h" // sotcport TEMP
+#include "diag/toggles.h" // sotcport: F7 diagnostics
 #include "hle/kernel/gpu_memory.h"
 #include "shader_recompiler/ir/passes/srt.h"
 
@@ -62,7 +63,8 @@ bool CheckSrtReads(Shader::Info& info, const u64* begin, const u64* end) {
     // only data the GPU really computes is left to the GPU.
     static const bool no_patches = std::getenv("SOTC_NO_SRT_PATCHES") != nullptr;
     const std::span<const u16> map = info.srt_read_map;
-    const bool use_map = !no_patches && map.size() == static_cast<size_t>(end - begin);
+    const bool use_map = !no_patches && !diag::On(diag::SrtPatchesOff) &&
+                         map.size() == static_cast<size_t>(end - begin);
     // Reads come in runs from the same table: decide per 4 KiB page whether the GPU wrote any of
     // it, or may in a queued packet (cheap), and only then look at the exact bytes.
     constexpr u64 PageBits = 12;
@@ -303,7 +305,8 @@ VideoCore::ImageId Rasterizer::FindTargetImage(TargetCacheEntry& entry, std::spa
     // SOTC_NO_TARGET_CACHE=1 looks every target up again (A/B measurements).
     static const bool disabled = std::getenv("SOTC_NO_TARGET_CACHE") != nullptr;
     ASSERT(key.size() <= entry.key.size());
-    if (!disabled && entry.generation == texture_cache.RegistryGeneration() &&
+    if (!disabled && !diag::On(diag::TargetCacheOff) &&
+        entry.generation == texture_cache.RegistryGeneration() &&
         entry.key_words == key.size() &&
         std::equal(key.begin(), key.end(), entry.key.begin())) {
         binding.desc = entry.binding.desc;
@@ -751,7 +754,7 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     constexpr u64 FillCopyShaderHash = 0x50784801;
     static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr;
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
-    if (disabled || cs.pgm_hash != FillCopyShaderHash) {
+    if (disabled || diag::On(diag::ShadowCopyOff) || cs.pgm_hash != FillCopyShaderHash) {
         return false;
     }
     // SOTC_VERIFY_SHADOW_COPY=1 (diagnostics): every 7th one is compared with what the GPU
@@ -1326,7 +1329,7 @@ void Rasterizer::GetLodStats(VAddr base, u32 size) {
     // SOTC_LOD_STATS=1 answers the requests (WriteLodStats); without it the buffer is left as
     // the game cleared it, as before (every texture then reads as needing its finest level).
     static const bool enabled = std::getenv("SOTC_LOD_STATS") != nullptr;
-    if (!enabled) {
+    if (!enabled && !diag::On(diag::LodStatsOn)) {
         return;
     }
     if (draw_pipe && OnStageA()) {
@@ -1681,7 +1684,8 @@ bool Rasterizer::VisitBindKey(const Pipeline* pipeline, Visit&& visit) {
     // need nothing done per draw but the flattened user data and streamed buffers (no GDS, user
     // clip planes, DMA, storage, SRT patches). ~63% of the eligible draws reuse their bindings.
     static const bool disabled = std::getenv("SOTC_NO_BIND_MEMO") != nullptr;
-    if (disabled || pipeline->IsCompute() || !DrawPipe::OnStageB()) {
+    if (disabled || diag::On(diag::BindMemoOff) || pipeline->IsCompute() ||
+        !DrawPipe::OnStageB()) {
         return false;
     }
     bool go_on = true;
@@ -2317,7 +2321,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // SOTC_NO_TEXTURE_CACHE_LOOKUP=1 finds every texture again (A/B).
             static const bool no_lookup = std::getenv("SOTC_NO_TEXTURE_CACHE_LOOKUP") != nullptr;
             ImageDescEntry* entry = mip_fallback_mode == Shader::MipStorageFallbackMode::None &&
-                                            !no_lookup
+                                            !no_lookup && !diag::On(diag::TextureLookupOff)
                                         ? CachedImageEntry(tsharp, image_desc)
                                         : nullptr;
             if (entry && entry->found_generation == texture_cache.RegistryGeneration()) {
