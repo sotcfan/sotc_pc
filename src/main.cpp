@@ -18,7 +18,9 @@
 #include "diag/gnm_recorder.h"
 #include "diag/gnm_trace.h"
 #include "diag/resource_dump.h"
+#include "diag/camera_probe.h"
 #include "diag/copy_watch.h"
+#include "diag/data_watch.h"
 #include "diag/freeze_watch.h"
 #include "diag/memory_types.h"
 #include "diag/packet_stats.h"
@@ -186,6 +188,8 @@ int main(int argc, char** argv) {
         diag::InstallPacketStats();  // SOTC_PACKET_STATS
         diag::InstallMemoryTypes();  // SOTC_MEMORY_TYPES
         input::InstallGameHooks();   // split actions (src/input/game_hooks.cpp)
+        diag::InstallCameraProbe();  // SOTC_PROBE_CAMERA (TEMP)
+        diag::InstallDataWatch();    // SOTC_WATCH_DATA
         linker.Link(eboot);
         linker.Start(eboot, game_args);
         RunMainLoop(dump_after_seconds);

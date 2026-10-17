@@ -125,6 +125,7 @@ void Install(const char* name, u64 address, Fn replacement, Fn& original) {
 } // namespace
 
 void InstallGameHooks() {
+    InstallMouseCamera();
     g_crouch_tag = TagBit("Crouch");
     // Without the tag in controls.ini there is nothing to split: leave the game's code alone.
     if (g_crouch_tag != 0) {

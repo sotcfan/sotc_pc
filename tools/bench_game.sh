@@ -52,8 +52,9 @@ if [ "$2" = perf ]; then
     ) &
 fi
 
-# Skip the opening cinematic, "Continue", load the most recent save (~59 s).
-keys="36:Escape,38:K,39:K,40:K,41.5:Return,50:Return,54:Return,58:Return"
+# Skip the opening cinematic, "Continue", load the most recent save (~59 s), with the benchmark's
+# own bindings (controls.ini, written below).
+keys="36:Escape,38:K,39:K,40:K,41.5:Space,50:Space,54:Space,58:Space"
 shots="80,95,110"
 duration=120
 window_from=75
@@ -107,6 +108,29 @@ mkdir -p "$data"
 if [ ! -d "$data/saves.snapshot" ]; then
     cp -a "$player_data/saves" "$data/saves.snapshot"
 fi
+# The key script needs keys of its own, whatever the player binds in their controls.ini (the
+# player's folder is not this one, but a new controls.ini gets the defaults, and those follow the
+# player's taste: K stopped being down on 2026-10-16 and the menu went to Settings instead of
+# Continue). So the benchmark writes its bindings every run.
+cat > "$data/controls.ini" <<'INI'
+# Written by tools/bench_game.sh on every run (the key scripts depend on it).
+W = LeftStickUp
+S = LeftStickDown
+A = LeftStickLeft
+D = LeftStickRight
+Up = RightStickUp
+Down = RightStickDown
+Left = RightStickLeft
+Right = RightStickRight
+Space = Cross
+Return = Cross
+Backspace = Circle
+I = DpadUp
+K = DpadDown
+J = DpadLeft
+L = DpadRight
+Escape = Options
+INI
 rm -rf "${data:?}/saves"
 cp -a "$data/saves.snapshot" "$data/saves"
 if [ -n "${SOTC_BENCH_SLOT:-}" ]; then

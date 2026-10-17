@@ -113,7 +113,8 @@ it). Not available on Windows: thread dumps on request (use `--dump-after`), F11
 - `--trace <file>`: records, in order, the first call to each Sony function.
 
 Controls: a gamepad (SDL3, buttons by position) or keyboard and mouse. Click in the window to
-capture the mouse (it turns the camera); F1 or Esc releases it (Esc also opens the pause menu).
+capture the mouse (it turns the game's free camera directly, as far as it moves; elsewhere it
+pushes the right stick); F1 or Esc releases it (Esc also opens the pause menu).
 Keyboard and mouse bindings are in `controls.ini` in the data folder, written with the defaults on
 the first run (WASD move, Left Alt walk, mouse/arrows camera, Space ✕, left button □, right
 button R2...); delete it to get the defaults back. F9 writes a marker into the log and saves a

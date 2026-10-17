@@ -75,6 +75,18 @@ std::uint32_t TagBit(const char* name);
 // thread (meant for the game's thread, inside a hook).
 bool ButtonHeldFor(std::uint32_t button, std::uint32_t tag_bit);
 
+// The native mouse camera (src/input/mouse_camera.cpp), on the game's thread at every update of
+// its free camera: the mouse movement since the last call as angles in radians (yaw: right is
+// positive; pitch: down is positive; the game's invert options are not applied), with the
+// sensitivity and invert setting of controls.ini applied. False when there is nothing to add (no
+// movement, mouse not captured, mouse_camera = stick, or a controller replay is running). While
+// the free camera keeps calling this, Read() leaves the right stick alone.
+bool TakeMouseLook(float& yaw, float& pitch);
+// Whether the mouse is turning the camera now (native mouse camera, mouse captured and moved in
+// the last 100 ms): the camera's stick reading then reports a movement, so that the game puts
+// its camera in its manual mode (mouse_camera.cpp).
+bool MouseLookActive();
+
 // A progress save was loaded: where a controller recording and its replay line up (see
 // SOTC_INPUT_RECORD in input.cpp).
 void NoteSaveLoaded();

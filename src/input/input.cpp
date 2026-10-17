@@ -9,7 +9,10 @@
 //   arrow keys       right stick, at full speed
 //   the buttons      see DefaultControls
 //
-// The mouse turns the camera through the right stick, because the game only knows a stick: the
+// The mouse turns the game's free camera directly (mouse_camera = native, the default): the
+// camera's update is hooked (src/input/mouse_camera.cpp) and takes the movement through
+// TakeMouseLook. Elsewhere (menus, the bow, the map) and with mouse_camera = stick, the mouse
+// turns the camera through the right stick, because the game only knows a stick: the
 // speed of the mouse becomes how far the stick is pushed (MouseLook). A stick sets how fast the
 // camera turns, so this gives "the camera turns as far as the mouse moved" only as long as the
 // game turns the camera at a speed proportional to the push. Beyond full push the camera cannot
@@ -81,8 +84,9 @@ namespace {
 // with, so the two never disagree.
 //
 // <input>   a key by its SDL name ("W", "Space", "Left Shift", "Return", "Up" = the up arrow...;
-//           https://wiki.libsdl.org/SDL3/SDL_Scancode), or Mouse Left, Mouse Right, Mouse Middle,
-//           Mouse Back, Mouse Forward (the two side buttons), Wheel Up, Wheel Down.
+//           https://wiki.libsdl.org/SDL3/SDL_Scancode), or Mouse Left, Mouse Right, Mouse Middle
+//           (also called Wheel Press: pressing the wheel), Mouse Back, Mouse Forward (the two
+//           side buttons), Wheel Up, Wheel Down.
 // <control> a PS4 button (Cross Circle Square Triangle L1 R1 L2 R2 L3 R3 Options TouchPad
 //           DpadUp DpadDown DpadLeft DpadRight), a stick direction (LeftStickUp, LeftStickDown,
 //           LeftStickLeft, LeftStickRight, and the same with RightStick), or Walk (while held,
@@ -141,9 +145,15 @@ P = DpadDown
 Escape = Options
 Tab = TouchPad
 
-# Mouse camera: how fast it turns (1 = full push of the stick at 1500 mouse counts per second),
-# the stick push a small movement starts from (the game ignores pushes smaller than its dead
-# zone; the controller reports 13/127 = 0.10), and whether moving the mouse up looks down.
+# Mouse camera. native: the mouse turns the game's camera directly (as far as it moves, no top
+# speed, no easing); where the game's camera is not the free camera (menus, aiming the bow...)
+# it falls back to pushing the right stick. stick: always the right stick.
+mouse_camera = native
+# How fast it turns: 1 = 0.001 radian per mouse count in native (about 20 cm for a full turn at
+# 800 dpi), or a full push of the stick at 1500 counts per second as a stick. The stick push a
+# small movement starts from (the game ignores pushes smaller than its dead zone; the controller
+# reports 13/127 = 0.10), and whether moving the mouse up looks down (in native, the game's
+# invert options are left to the stick; as a stick, they apply).
 mouse_sensitivity = 1.0
 mouse_deadzone = 0.10
 mouse_invert_y = 0
@@ -164,6 +174,7 @@ constexpr struct {
 } MouseSourceNames[] = {
     {"Mouse Left", MouseSource + SDL_BUTTON_LEFT},  {"Mouse Right", MouseSource + SDL_BUTTON_RIGHT},
     {"Mouse Middle", MouseSource + SDL_BUTTON_MIDDLE}, {"Mouse Back", MouseSource + SDL_BUTTON_X1},
+    {"Wheel Press", MouseSource + SDL_BUTTON_MIDDLE}, // the same button as Mouse Middle
     {"Mouse Forward", MouseSource + SDL_BUTTON_X2}, {"Wheel Up", WheelUpSource},
     {"Wheel Down", WheelDownSource},
 };
@@ -217,6 +228,7 @@ struct MouseSettings {
     float sensitivity = 1.0f;
     float deadzone = 0.10f;
     bool invert_y = false;
+    bool native_camera = true; // mouse_camera = native (see TakeMouseLook)
 };
 MouseSettings g_mouse_settings;
 float g_walk_speed = 0.4f;
@@ -314,6 +326,10 @@ void ParseControls(const std::string& text, const char* origin) {
         }
         if (left == "mouse_deadzone") {
             g_mouse_settings.deadzone = std::clamp(std::strtof(right.c_str(), nullptr), 0.0f, 0.9f);
+            continue;
+        }
+        if (left == "mouse_camera") {
+            g_mouse_settings.native_camera = !SameName(right, "stick");
             continue;
         }
         if (left == "mouse_invert_y") {
@@ -587,6 +603,17 @@ std::uint32_t g_mouse_held = 0;       // bit n: SDL mouse button n held
 // turns it into a stick push and keeps what a full push could not carry (see MouseLook).
 float g_mouse_dx = 0.0f;
 float g_mouse_dy = 0.0f;
+// The same movement for the native mouse camera (TakeMouseLook, src/input/mouse_camera.cpp),
+// which takes it on the game's thread whenever the game updates its free camera.
+float g_look_dx = 0.0f;
+float g_look_dy = 0.0f;
+// When the free camera last took the mouse: while it keeps taking it, the mouse stays off the
+// right stick. In menus, cinematics or other cameras (the bow, the map) the hook is not called,
+// and after NativeCameraTimeout the mouse goes back to pushing the stick.
+std::chrono::steady_clock::time_point g_native_camera_seen{};
+// When the captured mouse last moved (MouseLookActive).
+std::chrono::steady_clock::time_point g_last_motion{};
+constexpr auto NativeCameraTimeout = std::chrono::milliseconds{150};
 std::chrono::steady_clock::time_point g_last_read = std::chrono::steady_clock::now();
 
 // The wheel has no "held": every notch becomes a press of WheelPressReads controller reads
@@ -631,6 +658,7 @@ void SetMouseCaptured(SDL_Window* window, bool captured) {
     g_mouse_captured = captured;
     g_mouse_held = 0;
     g_mouse_dx = g_mouse_dy = 0.0f;
+    g_look_dx = g_look_dy = 0.0f;
     LOG_INFO("Input", "mouse {}", captured ? "captured (F1 or Escape releases it)" : "released");
 }
 
@@ -1026,6 +1054,9 @@ void HandleEvent(const SDL_Event& event) {
         if (g_mouse_captured) {
             g_mouse_dx += event.motion.xrel;
             g_mouse_dy += event.motion.yrel;
+            g_look_dx += event.motion.xrel;
+            g_look_dy += event.motion.yrel;
+            g_last_motion = std::chrono::steady_clock::now();
         }
         return; // nothing to recompute: Read() takes the movement
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -1093,8 +1124,15 @@ PadState Read() {
         Update();
     }
     PadState state = g_state;
-    // The mouse, when it moved, takes the right stick over from the gamepad and the arrows.
-    MouseLook(state.right_x, state.right_y);
+    // The mouse, when it moved, takes the right stick over from the gamepad and the arrows,
+    // unless the game's free camera is taking it directly (native mouse camera). Each path
+    // drops the movement it does not use, so none piles up for when the other takes over.
+    if (std::chrono::steady_clock::now() - g_native_camera_seen < NativeCameraTimeout) {
+        g_mouse_dx = g_mouse_dy = 0.0f;
+    } else {
+        g_look_dx = g_look_dy = 0.0f;
+        MouseLook(state.right_x, state.right_y);
+    }
     RecordOrReplay(state);
     RunDiagSequence();
     // What the game sees now, for ButtonHeldFor. A replay has no tags: all its buttons count as
@@ -1105,6 +1143,34 @@ PadState Read() {
         g_read_tagged_buttons[i] = replay ? 0 : g_tagged_buttons[i];
     }
     return replay ? g_replay_state : state;
+}
+
+bool MouseLookActive() {
+    std::scoped_lock lock{g_mutex};
+    // A mouse sends its movement in bursts (and none between two frames at a high polling
+    // rate): count it as moving for a little while after its last movement.
+    constexpr auto Linger = std::chrono::milliseconds{100};
+    return g_mouse_settings.native_camera && !g_replaying && g_mouse_captured &&
+           (g_look_dx != 0.0f || g_look_dy != 0.0f ||
+            std::chrono::steady_clock::now() - g_last_motion < Linger);
+}
+
+bool TakeMouseLook(float& yaw, float& pitch) {
+    std::scoped_lock lock{g_mutex};
+    if (!g_mouse_settings.native_camera || g_replaying) {
+        return false;
+    }
+    g_native_camera_seen = std::chrono::steady_clock::now();
+    if (!g_mouse_captured || (g_look_dx == 0.0f && g_look_dy == 0.0f)) {
+        g_look_dx = g_look_dy = 0.0f;
+        return false;
+    }
+    constexpr float RadiansPerCount = 0.001f; // at mouse_sensitivity 1
+    const float scale = RadiansPerCount * g_mouse_settings.sensitivity;
+    yaw = g_look_dx * scale;
+    pitch = (g_mouse_settings.invert_y ? -g_look_dy : g_look_dy) * scale;
+    g_look_dx = g_look_dy = 0.0f;
+    return true;
 }
 
 std::uint32_t TagBit(const char* name) {
