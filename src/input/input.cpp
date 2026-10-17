@@ -9,6 +9,7 @@
 //                    cursor (src/input/menu_mouse.cpp): pointing selects, the left button
 //                    confirms, the right button goes back, the wheel moves the selection; on
 //                    the world map dragging moves the map and the wheel zooms
+//   Escape           Options (the pause menu); in menus, Circle (back)
 //   arrow keys       right stick, at full speed
 //   the buttons      see DefaultControls
 //
@@ -618,6 +619,11 @@ constexpr auto MenuTimeout = std::chrono::milliseconds{200};
 float g_cursor_x = -1.0f;
 float g_cursor_y = -1.0f;
 std::uint32_t g_cursor_moves = 0;
+// Escape is Circle (back) in menus, Options (the pause menu) elsewhere: decided when it is pressed
+// and kept until it is released, so that the press that opens the pause menu does not go on as
+// a "back" that closes it again (NoteEscapePressed).
+bool g_escape_as_circle = false;
+
 // The left button held in a menu (dragging the map).
 bool g_menu_left_held = false;
 // A PS4 button held as long as the left button is (a click on a value control's arrow:
@@ -912,6 +918,11 @@ void Update() {
         if (g_bindings[source].empty() || !SourceHeld(source)) {
             continue;
         }
+        if (source == SDL_SCANCODE_ESCAPE && g_escape_as_circle) {
+            state.buttons |= button::Circle;
+            untagged |= button::Circle;
+            continue;
+        }
         for (const Control& control : g_bindings[source]) {
             switch (control.kind) {
             case Control::Button:
@@ -1149,6 +1160,9 @@ void RunScript() {
         const bool held = now >= entry.start && now < entry.end;
         if (held != entry.held) {
             entry.held = held;
+            if (held && entry.key == SDL_SCANCODE_ESCAPE) {
+                g_escape_as_circle = MenuOpen();
+            }
             g_script_keys[entry.key] = held;
             changed = true;
             if (held) {
@@ -1215,6 +1229,9 @@ void HandleEvent(const SDL_Event& event) {
             // Handled here and not in OnToolKey: that also runs for SOTC_KEY_SCRIPT on the
             // game's thread, and a benchmark must not grab the mouse of whoever is at the
             // computer.
+            if (event.key.scancode == SDL_SCANCODE_ESCAPE) {
+                g_escape_as_circle = MenuOpen();
+            }
             if (event.key.scancode == SDL_SCANCODE_F1) {
                 g_window = SDL_GetWindowFromID(event.key.windowID);
                 g_capture_wanted = !g_capture_wanted;

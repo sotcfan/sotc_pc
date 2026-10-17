@@ -52,6 +52,7 @@ namespace {
 constexpr u64 MenuGridInputAddress = 0x722780;
 constexpr u64 MenuGridSelectAddress = 0x7231e0;
 
+constexpr u32 GridConfigOffset = 0xa0;
 constexpr u32 GridItemsOffset = 0xf0;
 constexpr u32 GridSelectedOffset = 0x190;
 
@@ -75,6 +76,41 @@ using MenuGridSelectFn = bool PS4_SYSV_ABI (*)(u8* grid, u64 node, u64 context, 
                                                s32 from, s32 flag);
 MenuGridInputFn g_original_input = nullptr;
 const auto g_select = reinterpret_cast<MenuGridSelectFn>(MenuGridSelectAddress);
+
+// The sound of a selection moving. When the directional buttons move it, the grid's input
+// handling (0x722a9d) evaluates its configuration's "move sound" (+0x100, an evaluator: virtual
+// +0x38, with an evaluation context made by 0x7ca820(context, grid, game context), 0x48 bytes)
+// and plays what it names: 0xe5fb70(*0x36f8ff0, name, 0). The selection moved by the mouse
+// plays it the same way; selecting through 0x7231e0 alone (as the grid does for selections that
+// come from its data) is silent.
+constexpr u64 EvaluationContextAddress = 0x7ca820;
+constexpr u64 PlaySoundAddress = 0xe5fb70;
+constexpr u64 SoundPlayerAddress = 0x36f8ff0; // a global holding the player of UI sounds
+constexpr u32 ConfigMoveSoundOffset = 0x100;
+constexpr u32 EvaluateMethodOffset = 0x38;
+
+using EvaluationContextFn = void* PS4_SYSV_ABI (*)(void* context, u8* grid, u64 game_context);
+using EvaluateFn = const u64* PS4_SYSV_ABI (*)(u8* evaluator, void* context);
+using PlaySoundFn = void PS4_SYSV_ABI (*)(u64 player, u64 name, s32 flag);
+
+void PlayMoveSound(u8* grid, u64 game_context) {
+    const u8* config = *reinterpret_cast<const u8* const*>(grid + GridConfigOffset);
+    u8* evaluator = config ? *reinterpret_cast<u8* const*>(config + ConfigMoveSoundOffset)
+                           : nullptr;
+    if (!evaluator) {
+        return; // this menu has no sound for it
+    }
+    alignas(16) u8 context[0x48] = {};
+    reinterpret_cast<EvaluationContextFn>(EvaluationContextAddress)(context, grid, game_context);
+    const u8* vtable = *reinterpret_cast<const u8* const*>(evaluator);
+    const auto evaluate = *reinterpret_cast<const EvaluateFn*>(vtable + EvaluateMethodOffset);
+    const u64* name = evaluate(evaluator, context);
+    if (!name) {
+        return;
+    }
+    reinterpret_cast<PlaySoundFn>(PlaySoundAddress)(
+        *reinterpret_cast<const u64*>(SoundPlayerAddress), *name, 0);
+}
 
 template <typename T>
 T Get(const u8* base, u32 offset) {
@@ -170,8 +206,9 @@ u32 PS4_SYSV_ABI MenuGridInput(u8* grid, u64* update) {
     };
     const s32 selected = Get<s32>(grid, GridSelectedOffset);
     const auto select = [&](s32 index) {
-        if (index != Get<s32>(grid, GridSelectedOffset)) {
-            g_select(grid, update[0], update[2], 1, index - 1, 0);
+        if (index != Get<s32>(grid, GridSelectedOffset) &&
+            g_select(grid, update[0], update[2], 1, index - 1, 0)) {
+            PlayMoveSound(grid, update[2]);
         }
     };
     // Pointing: only when the cursor moved, so a cursor left over an item does not take the

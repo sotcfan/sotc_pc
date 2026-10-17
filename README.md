@@ -115,8 +115,9 @@ it). Not available on Windows: thread dumps on request (use `--dump-after`), F11
 Controls: a gamepad (SDL3, buttons by position) or keyboard and mouse. Click in the window to
 capture the mouse: it turns the game's free camera directly, as far as it moves (elsewhere it
 pushes the right stick); F1 releases it. In menus the mouse is a cursor: pointing at an item
-selects it, the left button confirms (or steps a value on its arrows), the right button goes back
-and the wheel moves the selection; on the world map dragging moves the map and the wheel zooms.
+selects it, the left button confirms (or steps a value on its arrows), the right button and Esc go
+back and the wheel moves the selection; on the world map dragging moves the map and the wheel
+zooms.
 Keyboard and mouse bindings are in `controls.ini` in the data folder, written with the defaults on
 the first run (WASD move, Left Alt walk, mouse/arrows camera, Space ✕, left button □, right
 button R2...); delete it to get the defaults back. F9 writes a marker into the log and saves a
