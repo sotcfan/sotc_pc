@@ -103,6 +103,9 @@ WindowSDL::~WindowSDL() {
 
 bool WindowSDL::ProcessEvents(int timeout_ms) {
     SDL_Event event;
+    // The mouse's mode (captured, or a cursor in menus) follows the game's state, not only
+    // events: checked at every turn of the loop.
+    input::PollWindow(window);
     if (!SDL_WaitEventTimeout(&event, timeout_ms)) {
         return true;
     }

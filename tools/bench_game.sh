@@ -130,6 +130,9 @@ K = DpadDown
 J = DpadLeft
 L = DpadRight
 Escape = Options
+Tab = TouchPad
+Z = L2
+X = R2
 INI
 rm -rf "${data:?}/saves"
 cp -a "$data/saves.snapshot" "$data/saves"

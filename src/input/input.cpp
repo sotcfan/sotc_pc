@@ -4,8 +4,11 @@
 // file gets; delete the file to get the defaults back). Keys are named by their position on a
 // QWERTY keyboard (SDL scancodes), so they stay put on other layouts. In short:
 //   W A S D          left stick (move), Left Alt held: walk (a shorter push of the stick)
-//   mouse            right stick (camera), once captured: click in the window to capture it
-//                    (that click does nothing else), F1 or leaving the window releases it
+//   mouse            the camera, once captured: click in the window to capture it (that click
+//                    does nothing else), F1 or leaving the window releases it; in menus it is a
+//                    cursor (src/input/menu_mouse.cpp): pointing selects, the left button
+//                    confirms, the right button goes back, the wheel moves the selection; on
+//                    the world map dragging moves the map and the wheel zooms
 //   arrow keys       right stick, at full speed
 //   the buttons      see DefaultControls
 //
@@ -22,8 +25,7 @@
 // executable first (same way as src/input/game_hooks.cpp).
 //
 // Tool keys (fixed, not in controls.ini):
-//   F1, Escape       release the mouse, or capture it again (Escape is also bound to Options,
-//                    the pause menu: the cursor is free while the menu is open)
+//   F1               releases the mouse, or captures it again
 //   F7               diagnostic sequence: for ~4 s each, turns off one GPU layer optimization
 //                    after another (src/diag/toggles.h) and takes 12 screenshots, with
 //                    "DIAG PHASE" lines in the log (for finding which one causes a defect that
@@ -109,7 +111,8 @@ A = LeftStickLeft
 D = LeftStickRight
 Left Alt = Walk
 
-# Camera: the mouse (click in the window to capture it, F1 or ESC to release it, press it again to recapture) and the arrows
+# Camera: the mouse (click in the window to capture it, F1 releases it; in menus it is a
+# cursor that points, clicks and scrolls) and the arrows
 Up = RightStickUp
 Down = RightStickDown
 Left = RightStickLeft
@@ -596,8 +599,42 @@ bool KeyHeld(SDL_Scancode key) {
 // Everything here is guarded by g_mutex: the window's thread writes it from HandleEvent, the
 // game's thread consumes it in Read.
 
-SDL_Window* g_mouse_window = nullptr; // the window the mouse is captured in, if any
-bool g_mouse_captured = false;
+// Capture: the mouse turns the camera (SDL's relative mode: no cursor, raw movement) while the
+// player wants it (g_capture_wanted: a click into the window sets it, F1 and leaving the window
+// clear it), the window has the focus and no menu is open. ApplyMouseMode() keeps
+// g_mouse_captured in step with that, on the window's thread.
+SDL_Window* g_window = nullptr; // the game's window (from its events)
+bool g_capture_wanted = false;
+bool g_mouse_captured = false;   // relative mode is on
+
+// Menus (src/input/menu_mouse.cpp): while a menu has the input, the mouse is a cursor. The
+// game's menu code tells when it runs (NoteMenuActive); a menu is open while it keeps doing so.
+std::chrono::steady_clock::time_point g_menu_seen{};
+std::chrono::steady_clock::time_point g_map_seen{}; // the world map, one of those "menus"
+constexpr auto MenuTimeout = std::chrono::milliseconds{200};
+// The cursor in the game's UI coordinates (1920 x 1080, whatever the window's size), and how
+// many times it moved (the menu code changes the selection only when the cursor moves, so that
+// a cursor left over an item does not fight the keyboard).
+float g_cursor_x = -1.0f;
+float g_cursor_y = -1.0f;
+std::uint32_t g_cursor_moves = 0;
+// The left button held in a menu (dragging the map).
+bool g_menu_left_held = false;
+// A PS4 button held as long as the left button is (a click on a value control's arrow:
+// HoldButtonWhileClicked), at least MenuHoldMinReads reads.
+std::uint32_t g_menu_hold = 0;
+int g_menu_hold_reads = 0;
+constexpr int MenuHoldMinReads = 3;
+// A left click in a menu, waiting for the menu code to find what it hit (MenuClickTimeout).
+bool g_click_pending = false;
+float g_click_x = 0.0f;
+float g_click_y = 0.0f;
+std::chrono::steady_clock::time_point g_click_time{};
+constexpr auto MenuClickTimeout = std::chrono::milliseconds{250};
+
+bool MenuOpen() {
+    return std::chrono::steady_clock::now() - g_menu_seen < MenuTimeout;
+}
 std::uint32_t g_mouse_held = 0;       // bit n: SDL mouse button n held
 // Mouse movement not given to the game yet, in mouse counts (SDL's relative motion). Read()
 // turns it into a stick push and keeps what a full push could not carry (see MouseLook).
@@ -645,21 +682,88 @@ void StepWheel(WheelPulse& wheel) {
     }
 }
 
-void SetMouseCaptured(SDL_Window* window, bool captured) {
-    if (captured == g_mouse_captured || (captured && !window)) {
+// Puts the mouse in the mode it should be in now (see g_capture_wanted). On the window's thread.
+void ApplyMouseMode() {
+    if (!g_window) {
+        return;
+    }
+    const bool focused = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    const bool captured = g_capture_wanted && focused && !MenuOpen();
+    if (captured == g_mouse_captured) {
         return;
     }
     // Relative mode hides the cursor, keeps it in the window and reports raw movement even at
-    // the window's edge.
-    if (SDL_Window* target = captured ? window : g_mouse_window) {
-        SDL_SetWindowRelativeMouseMode(target, captured);
-    }
-    g_mouse_window = captured ? window : nullptr;
+    // the window's edge; out of it the cursor shows again.
+    SDL_SetWindowRelativeMouseMode(g_window, captured);
     g_mouse_captured = captured;
     g_mouse_held = 0;
+    // A button held across the change is released on the other side: forget it here.
+    g_menu_left_held = false;
     g_mouse_dx = g_mouse_dy = 0.0f;
     g_look_dx = g_look_dy = 0.0f;
-    LOG_INFO("Input", "mouse {}", captured ? "captured (F1 or Escape releases it)" : "released");
+    LOG_INFO("Input", "mouse {}", captured ? "captured (F1 releases it)"
+                                  : MenuOpen() ? "free (menu)" : "released");
+}
+
+// A position in the window (SDL's window coordinates) in the game's UI coordinates. The
+// presenter fits the 16:9 picture in the window and centers it (FitImage in vk_presenter.cpp);
+// -1 outside the picture.
+void WindowToUi(float x, float y, float& ui_x, float& ui_y) {
+    int width = 0, height = 0;
+    if (!g_window || !SDL_GetWindowSize(g_window, &width, &height) || width <= 0 || height <= 0) {
+        ui_x = ui_y = -1.0f;
+        return;
+    }
+    constexpr float UiWidth = 1920.0f, UiHeight = 1080.0f;
+    const float scale = std::min(width / UiWidth, height / UiHeight);
+    ui_x = (x - (width - UiWidth * scale) / 2) / scale;
+    ui_y = (y - (height - UiHeight * scale) / 2) / scale;
+    if (ui_x < 0 || ui_y < 0 || ui_x >= UiWidth || ui_y >= UiHeight) {
+        ui_x = ui_y = -1.0f;
+    }
+}
+
+// Presses of PS4 buttons the menus ask for (a click is Cross, the right button Circle, the wheel
+// the directional buttons): each is held for PulsePressReads reads, then released for
+// PulseReleaseReads, one after the other (like the wheel notches, for the same reason).
+constexpr int PulsePressReads = 3;
+constexpr int PulseReleaseReads = 2;
+std::vector<std::uint32_t> g_pulse_queue;
+std::uint32_t g_pulse_button = 0; // the one being pressed or released
+int g_pulse_reads = 0;
+bool g_pulse_pressed = false;
+
+void QueuePulse(std::uint32_t button) {
+    if (g_pulse_queue.size() < 4) {
+        g_pulse_queue.push_back(button);
+    }
+}
+
+// The wheel in a menu moves the selection up and down; on the map it zooms (R2 in, L2 out, as
+// the map's legend says).
+void MenuWheel(float notches) {
+    if (!MenuOpen() || notches == 0) {
+        return;
+    }
+    const bool map = std::chrono::steady_clock::now() - g_map_seen < MenuTimeout;
+    QueuePulse(map ? (notches > 0 ? button::R2 : button::L2)
+                   : (notches > 0 ? button::Up : button::Down));
+}
+
+// One controller read went by.
+void StepPulse() {
+    if (g_pulse_reads > 0 && --g_pulse_reads > 0) {
+        return;
+    }
+    if (g_pulse_pressed) {
+        g_pulse_pressed = false;
+        g_pulse_reads = PulseReleaseReads;
+    } else if (!g_pulse_queue.empty()) {
+        g_pulse_button = g_pulse_queue.front();
+        g_pulse_queue.erase(g_pulse_queue.begin());
+        g_pulse_pressed = true;
+        g_pulse_reads = PulsePressReads;
+    }
 }
 
 // Turns the mouse movement since the last read into a push of the right stick. Called by
@@ -957,10 +1061,84 @@ std::vector<ScriptedKey> ParseScript() {
     return script;
 }
 
+// SOTC_MOUSE_SCRIPT="80:move:400:500,82:click:400:545": moves the menu cursor, clicks, presses
+// (down) and releases (up) the left button, clicks the right button (right) or turns the wheel
+// (wheelup, wheeldown) at
+// those seconds (same clock as SOTC_KEY_SCRIPT), in the game's UI coordinates (1920 x 1080):
+// for testing the mouse in menus with nobody at the mouse. Only while the mouse is not captured.
+struct ScriptedMouse {
+    double time;
+    enum Action { Move, Click, Down, Up, Right, WheelUp, WheelDown } action;
+    float x, y;
+    bool done = false;
+};
+
+std::vector<ScriptedMouse> ParseMouseScript() {
+    std::vector<ScriptedMouse> script;
+    const char* text = std::getenv("SOTC_MOUSE_SCRIPT");
+    for (const char* p = text; p && *p;) {
+        ScriptedMouse entry{};
+        char action[16] = {};
+        int used = 0;
+        if (std::sscanf(p, "%lf:%15[a-z]:%f:%f%n", &entry.time, action, &entry.x, &entry.y,
+                        &used) != 4) {
+            LOG_WARNING("Input", "SOTC_MOUSE_SCRIPT: cannot read \"{}\"", p);
+            break;
+        }
+        entry.action = std::strcmp(action, "click") == 0  ? ScriptedMouse::Click
+                       : std::strcmp(action, "down") == 0 ? ScriptedMouse::Down
+                       : std::strcmp(action, "up") == 0   ? ScriptedMouse::Up
+                       : std::strcmp(action, "right") == 0 ? ScriptedMouse::Right
+                       : std::strcmp(action, "wheelup") == 0   ? ScriptedMouse::WheelUp
+                       : std::strcmp(action, "wheeldown") == 0 ? ScriptedMouse::WheelDown
+                                                               : ScriptedMouse::Move;
+        script.push_back(entry);
+        p += used;
+        p += *p == ',';
+    }
+    return script;
+}
+
+void RunMouseScript(double now) {
+    static std::vector<ScriptedMouse> script = ParseMouseScript();
+    for (ScriptedMouse& entry : script) {
+        if (entry.done || now < entry.time) {
+            continue;
+        }
+        entry.done = true;
+        if (g_mouse_captured) {
+            continue;
+        }
+        g_cursor_x = entry.x;
+        g_cursor_y = entry.y;
+        ++g_cursor_moves;
+        if (entry.action == ScriptedMouse::Click || entry.action == ScriptedMouse::Down) {
+            g_click_x = entry.x;
+            g_click_y = entry.y;
+            g_click_pending = true;
+            g_click_time = std::chrono::steady_clock::now();
+        }
+        if (entry.action == ScriptedMouse::Down || entry.action == ScriptedMouse::Up) {
+            g_menu_left_held = entry.action == ScriptedMouse::Down;
+        }
+        if (entry.action == ScriptedMouse::Right && MenuOpen()) {
+            QueuePulse(button::Circle);
+        }
+        if (entry.action == ScriptedMouse::WheelUp || entry.action == ScriptedMouse::WheelDown) {
+            MenuWheel(entry.action == ScriptedMouse::WheelUp ? 1.0f : -1.0f);
+        }
+        static constexpr const char* Names[] = {"move",  "click",   "down",     "up",
+                                                "right", "wheelup", "wheeldown"};
+        LOG_INFO("Input", "mouse script: {} {:.0f},{:.0f}", Names[entry.action], entry.x,
+                 entry.y);
+    }
+}
+
 // Presses and releases the scripted keys whose time has come.
 void RunScript() {
     static std::vector<ScriptedKey> script = ParseScript();
     static const auto start = std::chrono::steady_clock::now();
+    RunMouseScript(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
     if (script.empty()) {
         return;
     }
@@ -1033,14 +1211,14 @@ void HandleEvent(const SDL_Event& event) {
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
         if (!event.key.repeat) {
-            // F1 and Escape release the mouse, or capture it again. Escape is also the game's
-            // pause menu (Options, in the bindings), so opening the menu frees the cursor and
-            // closing it with Escape takes the mouse back. Handled here and not in OnToolKey:
-            // that also runs for SOTC_KEY_SCRIPT on the game's thread, and a benchmark must not
-            // grab the mouse of whoever is at the computer.
-            if (event.key.scancode == SDL_SCANCODE_F1 ||
-                event.key.scancode == SDL_SCANCODE_ESCAPE) {
-                SetMouseCaptured(SDL_GetWindowFromID(event.key.windowID), !g_mouse_captured);
+            // F1 releases the mouse, or captures it again (menus free it by themselves).
+            // Handled here and not in OnToolKey: that also runs for SOTC_KEY_SCRIPT on the
+            // game's thread, and a benchmark must not grab the mouse of whoever is at the
+            // computer.
+            if (event.key.scancode == SDL_SCANCODE_F1) {
+                g_window = SDL_GetWindowFromID(event.key.windowID);
+                g_capture_wanted = !g_capture_wanted;
+                ApplyMouseMode();
             }
             OnToolKey(event.key.scancode);
         }
@@ -1057,16 +1235,40 @@ void HandleEvent(const SDL_Event& event) {
             g_look_dx += event.motion.xrel;
             g_look_dy += event.motion.yrel;
             g_last_motion = std::chrono::steady_clock::now();
+        } else {
+            // A cursor: where it is in the game's UI, for the menus.
+            WindowToUi(event.motion.x, event.motion.y, g_cursor_x, g_cursor_y);
+            ++g_cursor_moves;
         }
         return; // nothing to recompute: Read() takes the movement
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
         if (!g_mouse_captured) {
-            // A click into a free cursor only captures the mouse: it was meant for the window,
-            // not for the game (and its release must not reach the game either).
-            if (event.button.down) {
-                SetMouseCaptured(SDL_GetWindowFromID(event.button.windowID), true);
+            g_window = SDL_GetWindowFromID(event.button.windowID);
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                g_menu_left_held = event.button.down && MenuOpen();
             }
+            if (!event.button.down) {
+                return;
+            }
+            // Clicking into the window means playing with the mouse: once no menu is open, it
+            // is captured.
+            g_capture_wanted = true;
+            if (MenuOpen()) {
+                // In a menu: the left button picks what is under the cursor (the menu code
+                // finds it), the right button goes back.
+                if (event.button.button == SDL_BUTTON_LEFT) {
+                    WindowToUi(event.button.x, event.button.y, g_click_x, g_click_y);
+                    g_click_pending = g_click_x >= 0;
+                    g_click_time = std::chrono::steady_clock::now();
+                } else if (event.button.button == SDL_BUTTON_RIGHT) {
+                    QueuePulse(button::Circle);
+                }
+                return;
+            }
+            // Out of menus a click into a free cursor only captures the mouse: it was meant for
+            // the window, not for the game (and its release must not reach the game either).
+            ApplyMouseMode();
             return;
         }
         if (event.button.button >= SDL_BUTTON_LEFT && event.button.button <= SDL_BUTTON_X2) {
@@ -1075,14 +1277,15 @@ void HandleEvent(const SDL_Event& event) {
         }
         break;
     case SDL_EVENT_MOUSE_WHEEL: {
-        if (!g_mouse_captured) {
-            return;
-        }
         // A notch is y = +-1 (more in one event when the wheel spins fast); a "flipped" wheel
         // (natural scrolling) reports the opposite sign, turned back here.
         float notches = event.wheel.y;
         if (event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED) {
             notches = -notches;
+        }
+        if (!g_mouse_captured) {
+            MenuWheel(notches);
+            return;
         }
         WheelPulse& wheel = g_wheel[notches < 0 ? 1 : 0];
         const int count = std::max(1, static_cast<int>(std::lround(std::abs(notches))));
@@ -1093,7 +1296,9 @@ void HandleEvent(const SDL_Event& event) {
         // Key releases go to the window that has the focus: forget everything held, and let
         // the mouse go (it is captured again with a click).
         std::fill(std::begin(g_keys), std::end(g_keys), false);
-        SetMouseCaptured(nullptr, false);
+        g_menu_left_held = false;
+        g_capture_wanted = false;
+        ApplyMouseMode();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
         OpenGamepad(event.gdevice.which);
@@ -1123,7 +1328,27 @@ PadState Read() {
     if (g_wheel[0].pressed != wheel_was_pressed[0] || g_wheel[1].pressed != wheel_was_pressed[1]) {
         Update();
     }
+    // The presses the menus asked for.
+    StepPulse();
     PadState state = g_state;
+    if (g_menu_hold) {
+        if (g_menu_left_held || g_menu_hold_reads < MenuHoldMinReads) {
+            state.buttons |= g_menu_hold;
+            ++g_menu_hold_reads;
+        } else {
+            g_menu_hold = 0;
+        }
+    }
+    if (g_pulse_pressed) {
+        state.buttons |= g_pulse_button;
+        // The triggers are analog too: the game may read how far they are pressed.
+        if (g_pulse_button & button::L2) {
+            state.l2 = 0xFF;
+        }
+        if (g_pulse_button & button::R2) {
+            state.r2 = 0xFF;
+        }
+    }
     // The mouse, when it moved, takes the right stick over from the gamepad and the arrows,
     // unless the game's free camera is taking it directly (native mouse camera). Each path
     // drops the movement it does not use, so none piles up for when the other takes over.
@@ -1143,6 +1368,62 @@ PadState Read() {
         g_read_tagged_buttons[i] = replay ? 0 : g_tagged_buttons[i];
     }
     return replay ? g_replay_state : state;
+}
+
+void PollWindow(SDL_Window* window) {
+    std::scoped_lock lock{g_mutex};
+    g_window = window;
+    ApplyMouseMode();
+}
+
+void NoteMenuActive(bool map) {
+    std::scoped_lock lock{g_mutex};
+    g_menu_seen = std::chrono::steady_clock::now();
+    if (map) {
+        g_map_seen = g_menu_seen;
+    }
+}
+
+bool MenuCursor(float& x, float& y, std::uint32_t& moves) {
+    std::scoped_lock lock{g_mutex};
+    if (g_mouse_captured || g_cursor_x < 0) {
+        return false;
+    }
+    x = g_cursor_x;
+    y = g_cursor_y;
+    moves = g_cursor_moves;
+    return true;
+}
+
+bool PeekMenuClick(float& x, float& y) {
+    std::scoped_lock lock{g_mutex};
+    if (g_click_pending && std::chrono::steady_clock::now() - g_click_time > MenuClickTimeout) {
+        g_click_pending = false; // no menu found anything under it
+    }
+    x = g_click_x;
+    y = g_click_y;
+    return g_click_pending;
+}
+
+bool MenuDragging() {
+    std::scoped_lock lock{g_mutex};
+    return g_menu_left_held && !g_mouse_captured;
+}
+
+void TakeMenuClick() {
+    std::scoped_lock lock{g_mutex};
+    g_click_pending = false;
+}
+
+void HoldButtonWhileClicked(std::uint32_t button) {
+    std::scoped_lock lock{g_mutex};
+    g_menu_hold = button;
+    g_menu_hold_reads = 0;
+}
+
+void PressButtonOnce(std::uint32_t button) {
+    std::scoped_lock lock{g_mutex};
+    QueuePulse(button);
 }
 
 bool MouseLookActive() {

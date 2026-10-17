@@ -125,11 +125,136 @@ void OnOrientExit(const ObservedCall& call) {
 }
 const CallObserver g_orient_observer{OnOrientEnter, OnOrientExit};
 
+// SOTC_PROBE_CAMERA=menu: the menu grid's input handling (0x722780, (grid, update args)), once a
+// second: the selected index (+0x190), the items (+0xf0..+0xf8, UI nodes) and the rectangle
+// fields of each item's node (+0x1e4 position, +0x1ec size, +0x1f4/+0x1fc offsets, +0x204/+0x20c
+// bounds), to see in which space they are.
+constexpr u64 MenuGridInputAddress = 0x722780;
+void OnMenuExit(const ObservedCall& call) {
+    static std::atomic<s64> last{0};
+    const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    s64 previous = last.load(std::memory_order_relaxed);
+    if (now - previous < 1000 || !last.compare_exchange_strong(previous, now)) {
+        return;
+    }
+    const auto* grid = reinterpret_cast<const u8*>(call.args[0]);
+    const auto begin = *reinterpret_cast<u8* const* const*>(grid + 0xf0);
+    const auto end = *reinterpret_cast<u8* const* const*>(grid + 0xf8);
+    const auto* config = *reinterpret_cast<const u8* const*>(grid + 0xa0);
+    const auto* update = reinterpret_cast<const u64*>(call.args[1]);
+    LOG_INFO("CamProbe", "menu grid {:#x} selected {} of {}, orientation {}, args node {:#x}",
+             call.args[0], *reinterpret_cast<const s32*>(grid + 0x190), end - begin,
+             *reinterpret_cast<const s32*>(config + 0xec), update[0]);
+    // Once per grid: find where a node keeps its children (a field pointing to nodes whose
+    // parent, +0x1b0, is that node: a pointer or a vector begin/end), then print the item trees
+    // with absolute rectangles (position + offset summed up the parents, size + size offset).
+    static std::atomic<u64> dumped{0};
+    if (dumped.exchange(call.args[0]) == call.args[0]) {
+        return;
+    }
+    const auto plausible = [](u64 v) {
+        return v >= 0x100000000ull && v < 0x800000000ull && v % 8 == 0;
+    };
+    const auto parent_of = [](const u8* n) { return *reinterpret_cast<const u8* const*>(n + 0x1b0); };
+    const auto absolute = [&](const u8* n, float& x, float& y) {
+        x = y = 0;
+        for (; n; n = parent_of(n)) {
+            const auto* f = reinterpret_cast<const float*>(n + 0x1e4);
+            x += f[0] + f[4];
+            y += f[1] + f[5];
+        }
+    };
+    const u8* item0 = *begin;
+    for (u32 off = 0; off < 0x240; off += 8) {
+        const u64 v = *reinterpret_cast<const u64*>(item0 + off);
+        if (!plausible(v)) {
+            continue;
+        }
+        if (parent_of(reinterpret_cast<const u8*>(v)) == item0) {
+            LOG_INFO("CamProbe", "  item 0 +{:#x}: points to a child", off);
+        }
+        const u64 e = *reinterpret_cast<const u64*>(item0 + off + 8);
+        if (e > v && e - v <= 64 * 8 && plausible(*reinterpret_cast<const u64*>(v))) {
+            int children = 0;
+            for (u64 q = v; q < e; q += 8) {
+                const u64 c = *reinterpret_cast<const u64*>(q);
+                children += plausible(c) && parent_of(reinterpret_cast<const u8*>(c)) == item0;
+            }
+            if (children) {
+                LOG_INFO("CamProbe", "  item 0 +{:#x}: vector of {} with {} children", off,
+                         (e - v) / 8, children);
+            }
+        }
+    }
+    // The chain of item 0's ancestors, raw.
+    for (const u8* n = item0; n; n = parent_of(n)) {
+        const auto* f = reinterpret_cast<const float*>(n + 0x1e4);
+        LOG_INFO("CamProbe", "  up {}: pos {:.1f},{:.1f} size {:.1f},{:.1f} off {:.1f},{:.1f} "
+                 "soff {:.1f},{:.1f} b {:.1f},{:.1f},{:.1f},{:.1f} s {:.2f} {:#x} flags {:#x}",
+                 static_cast<const void*>(n), f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+                 f[8], f[9], f[10], f[11], f[12], *reinterpret_cast<const u32*>(n + 0x218),
+                 *reinterpret_cast<const u32*>(n + 0x1d8));
+    }
+    // The children of item 0's parent: a field of the parent that is a vector of nodes whose
+    // parent is it.
+    {
+        const u8* box = parent_of(item0);
+        for (u32 off = 0; box && off < 0x240; off += 8) {
+            const u64 v = *reinterpret_cast<const u64*>(box + off);
+            const u64 e = *reinterpret_cast<const u64*>(box + off + 8);
+            if (!plausible(v) || e <= v || e - v > 64 * 8) {
+                continue;
+            }
+            int children = 0;
+            for (u64 q = v; q < e; q += 8) {
+                const u64 c = *reinterpret_cast<const u64*>(q);
+                children += plausible(c) && parent_of(reinterpret_cast<const u8*>(c)) == box;
+            }
+            if (!children) {
+                continue;
+            }
+            LOG_INFO("CamProbe", "  box +{:#x}: vector of {} with {} children", off, (e - v) / 8,
+                     children);
+            for (u64 q = v; q < e; q += 8) {
+                const auto* c = *reinterpret_cast<const u8* const*>(q);
+                float x, y;
+                absolute(c, x, y);
+                const auto* f = reinterpret_cast<const float*>(c + 0x1e4);
+                LOG_INFO("CamProbe", "    child {}: abs {:.1f},{:.1f} size {:.1f},{:.1f} local "
+                         "{:.1f},{:.1f} off {:.1f},{:.1f} flags {:#x}{}",
+                         static_cast<const void*>(c), x, y, f[2] + f[6], f[3] + f[7], f[0], f[1],
+                         f[4], f[5], *reinterpret_cast<const u32*>(c + 0x1d8),
+                         c == item0 ? " (the item)" : "");
+            }
+        }
+    }
+    // Also: which items have the grid's node (or something under it) as parent.
+    for (auto it = begin; it != end && it - begin < 12; ++it) {
+        float x, y;
+        absolute(*it, x, y);
+        const auto* f = reinterpret_cast<const float*>(*it + 0x1e4);
+        LOG_INFO("CamProbe", "  item {} {}: abs {:.1f},{:.1f} size {:.1f},{:.1f} parent {} flags "
+                 "{:#x}", it - begin, static_cast<const void*>(*it), x, y, f[2] + f[6],
+                 f[3] + f[7], static_cast<const void*>(parent_of(*it)),
+                 *reinterpret_cast<const u32*>(*it + 0x1d8));
+    }
+}
+
+const CallObserver g_menu_observer{OnEnter, OnMenuExit};
+
 } // namespace
 
 void InstallCameraProbe() {
     const char* text = std::getenv("SOTC_PROBE_CAMERA");
     if (!text || !*text) {
+        return;
+    }
+    if (std::strcmp(text, "menu") == 0) {
+        const u64 addresses[] = {MenuGridInputAddress};
+        const auto hooked = ObserveCalls(addresses, &g_menu_observer);
+        LOG_INFO("CamProbe", "menu probe {}", hooked[0] ? "on" : "FAILED");
         return;
     }
     if (std::strcmp(text, "orient") == 0) {

@@ -9,6 +9,7 @@
 #include <cstdint>
 
 union SDL_Event;
+struct SDL_Window;
 
 namespace input {
 
@@ -86,6 +87,28 @@ bool TakeMouseLook(float& yaw, float& pitch);
 // the last 100 ms): the camera's stick reading then reports a movement, so that the game puts
 // its camera in its manual mode (mouse_camera.cpp).
 bool MouseLookActive();
+
+// On the window's thread, at every turn of its event loop: puts the mouse in the mode it should be
+// in (captured for the camera, or a cursor while a menu is open).
+void PollWindow(SDL_Window* window);
+
+// The mouse in the game's menus (src/input/menu_mouse.cpp), from the game's thread:
+// A menu has the input now (called at every update of a menu that handles input); the mouse is a
+// cursor while menus keep calling this.
+void NoteMenuActive(bool map = false); // map: the world map (the wheel zooms there)
+// The cursor in the game's UI coordinates (1920 x 1080) and a count of its movements; false when
+// there is no cursor (mouse captured, or outside the picture).
+bool MenuCursor(float& x, float& y, std::uint32_t& moves);
+// A left click waiting for the menu that has an item under it: its position (UI coordinates).
+// The menu that hits takes it (TakeMenuClick); unclaimed clicks expire.
+bool PeekMenuClick(float& x, float& y);
+void TakeMenuClick();
+// Whether the left button is held in a menu (dragging).
+bool MenuDragging();
+// Presses a PS4 button for a few controller reads (after any presses already queued).
+void PressButtonOnce(std::uint32_t button);
+// Holds a PS4 button for as long as the left mouse button stays down (a few reads at least).
+void HoldButtonWhileClicked(std::uint32_t button);
 
 // A progress save was loaded: where a controller recording and its replay line up (see
 // SOTC_INPUT_RECORD in input.cpp).

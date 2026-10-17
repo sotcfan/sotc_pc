@@ -11,7 +11,9 @@ namespace input {
 // known yet.
 void InstallGameHooks();
 
-// The native mouse camera (mouse_camera.cpp). Called by InstallGameHooks.
+// The native mouse camera (mouse_camera.cpp) and the mouse in menus (menu_mouse.cpp). Called
+// by InstallGameHooks.
 void InstallMouseCamera();
+void InstallMenuMouse();
 
 } // namespace input
