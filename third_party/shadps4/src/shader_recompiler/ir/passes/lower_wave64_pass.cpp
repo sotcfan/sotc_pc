@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <boost/container/small_vector.hpp>
+
 #include "common/logging/classes.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -11,31 +14,58 @@
 
 namespace Shader::Optimization {
 
-static bool IsDivergentCondition(const IR::U1& condition) {
+// sotcport: whether a branch condition can differ between the invocations of a workgroup.
+// A value read with ReadLane, ReadFirstLane or Ballot is the same in every lane of a GCN wave, so
+// when the workgroup is a single wave (64 threads or fewer) it cannot make a branch divergent,
+// whatever per-lane data it was read from: the search stops there instead of going on into that
+// data. shadPS4's breadth-first search went through them and took such branches for divergent,
+// so the lane reads under them were not lowered: on NVIDIA (subgroups of 32) a tiled lighting
+// shader (0xfb974c0e: per 8x8 tile, depth bounds and a light mask, each joined from lanes 0 and
+// 32) read an undefined lane 32 (2026-10-19). With more than one wave in the workgroup the waves
+// can disagree, and such values still count as divergent.
+static bool IsDivergentCondition(const IR::U1& condition, bool single_wave) {
     if (condition.IsImmediate()) {
         return false;
     }
-    const IR::Inst* const condition_inst = condition.Inst();
-    return IR::BreadthFirstSearch(condition_inst,
-                                  [](const IR::Inst* inst) -> std::optional<bool> {
-                                      switch (inst->GetOpcode()) {
-                                      case IR::Opcode::LaneId:
-                                          return true;
-                                      case IR::Opcode::GetAttributeU32:
-                                          if (inst->Arg(0).Attribute() ==
-                                              IR::Attribute::LocalInvocationId) {
-                                              return true;
-                                          }
-                                          break;
-                                      default:
-                                          break;
-                                      }
-                                      return std::nullopt;
-                                  })
-        .value_or(false);
+    boost::container::small_vector<const IR::Inst*, 64> stack{condition.Inst()};
+    boost::container::small_vector<const IR::Inst*, 64> visited;
+    while (!stack.empty()) {
+        const IR::Inst* const inst = stack.back();
+        stack.pop_back();
+        if (std::ranges::find(visited, inst) != visited.end()) {
+            continue;
+        }
+        visited.push_back(inst);
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::LaneId:
+            return true;
+        case IR::Opcode::GetAttributeU32:
+            if (inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId ||
+                inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationIndex) {
+                return true;
+            }
+            break;
+        case IR::Opcode::ReadLane:
+        case IR::Opcode::ReadFirstLane:
+        case IR::Opcode::Ballot:
+            if (single_wave) {
+                continue; // the same in the whole workgroup: not followed
+            }
+            break;
+        default:
+            break;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            const IR::Value value = inst->Arg(arg);
+            if (!value.IsImmediate()) {
+                stack.push_back(value.Inst());
+            }
+        }
+    }
+    return false;
 }
 
-static std::vector<IR::Block*> FindUniformBlocks(const IR::Program& program) {
+static std::vector<IR::Block*> FindUniformBlocks(const IR::Program& program, bool single_wave) {
     using Type = IR::AbstractSyntaxNode::Type;
 
     struct ConditionalScope {
@@ -50,7 +80,7 @@ static std::vector<IR::Block*> FindUniformBlocks(const IR::Program& program) {
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case Type::If: {
-            const bool divergent = IsDivergentCondition(node.data.if_node.cond);
+            const bool divergent = IsDivergentCondition(node.data.if_node.cond, single_wave);
             conditionals.push_back({node.data.if_node.merge, divergent});
             divergence_depth += static_cast<u32>(divergent);
             break;
@@ -114,7 +144,7 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
     }
 
     std::vector<IR::Inst*> worklist;
-    const auto uniform_blocks = FindUniformBlocks(program);
+    const auto uniform_blocks = FindUniformBlocks(program, num_threads <= 64);
     for (IR::Block* block : program.blocks) {
         const bool is_uniform = std::ranges::contains(uniform_blocks, block);
         const auto push_worklist = [&](IR::Inst& inst) {
