@@ -281,8 +281,9 @@ void BufferCache::CompleteReadback(AsyncReadback& readback, VAddr device_addr, u
         });
     }
     readback_cv.notify_all();
-    // The staging memory goes back to the pool on the GPU command thread, which owns it.
-    liverpool->SendCommand([this, staging = readback.staging] { staging_pool.FreeDeferred(staging); });
+    // The staging memory goes back to the pool at its owner's next request (sotcport: it was a
+    // command for the GPU command thread, which drained the draw pipeline for it).
+    staging_pool.FreeDeferredFromAnyThread(readback.staging);
 }
 
 void BufferCache::WaitForReadbacks(VAddr addr, u64 size) {

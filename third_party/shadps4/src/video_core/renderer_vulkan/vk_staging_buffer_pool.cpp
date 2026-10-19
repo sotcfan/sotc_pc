@@ -39,6 +39,7 @@ StagingBufferRef StagingBufferPool::Request(u64 size, MemoryType type, u64 align
                                             bool unsynchronized) {
     Ring& ring = rings[u32(type)];
     if (deferred || size > BLOCK_SIZE) {
+        ApplyPendingFrees(); // sotcport: see FreeDeferredFromAnyThread
         return RequestLarge(size, type, deferred, unsynchronized);
     }
     return RequestFromRing(ring, size, alignment, type, unsynchronized);
@@ -133,6 +134,24 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     return ref;
 }
 
+void StagingBufferPool::FreeDeferredFromAnyThread(const StagingBufferRef& ref) {
+    std::scoped_lock lock{pending_mutex};
+    pending_frees.push_back(ref);
+    num_pending_frees.fetch_add(1, std::memory_order_release);
+}
+
+void StagingBufferPool::ApplyPendingFrees() {
+    if (num_pending_frees.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    std::scoped_lock lock{pending_mutex};
+    for (const auto& ref : pending_frees) {
+        FreeDeferred(ref);
+    }
+    num_pending_frees.fetch_sub(static_cast<u32>(pending_frees.size()), std::memory_order_relaxed);
+    pending_frees.clear();
+}
+
 void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
     auto& cache = large_caches[u32(ref.type)];
     const auto it = std::ranges::find_if(
@@ -144,6 +163,7 @@ void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
 }
 
 void StagingBufferPool::TickFrame() {
+    ApplyPendingFrees(); // sotcport: before trimming, so released buffers can go
     ++frame;
     for (Ring& ring : rings) {
         TrimRing(ring);

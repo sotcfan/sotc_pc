@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
+
 #include <array>
 #include <memory>
 #include <vector>
@@ -46,6 +49,13 @@ public:
     /// Releases a deferred allocation. It becomes reusable once the current tick completes.
     void FreeDeferred(const StagingBufferRef& ref);
 
+    /// sotcport: the same from any thread (a guest thread done with a readback): the pool's
+    /// owner applies it at its next request. A readback used to hand the release to the GPU
+    /// command thread as a command, and every command drained the two-stage draw pipeline: stage
+    /// A waited for stage B to finish everything queued (~1 ms), a couple of times a frame in the
+    /// middle of the heaviest frames (2026-10-19).
+    void FreeDeferredFromAnyThread(const StagingBufferRef& ref);
+
     /// Releases idle memory.
     void TickFrame();
 
@@ -85,6 +95,11 @@ private:
     std::array<Ring, NUM_TYPES> rings;
     std::array<std::vector<LargeBuffer>, NUM_TYPES> large_caches;
     u64 frame = 0;
+
+    void ApplyPendingFrees(); ///< sotcport: see FreeDeferredFromAnyThread
+    std::mutex pending_mutex;
+    std::vector<StagingBufferRef> pending_frees;
+    std::atomic<u32> num_pending_frees{0};
 };
 
 } // namespace Vulkan
