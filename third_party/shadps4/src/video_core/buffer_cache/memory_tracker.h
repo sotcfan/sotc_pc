@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <bit>
+
 #include <cstdlib>
 
 #include <algorithm>
@@ -49,6 +51,9 @@ public:
                 manager->template ChangeRegionState<StateOp::None, StateOp::Clear>(offset, size);
             }
         });
+        if (is_write) {
+            NoteCpuDirty(cpu_addr, size); // sotcport: CPU-modified now
+        }
     }
 
     /// Mark region as modified from the CPU
@@ -56,7 +61,42 @@ public:
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->template ChangeRegionState<StateOp::Set, StateOp::None>(offset, size);
         });
+        NoteCpuDirty(cpu_addr, size);
+    }
+
+    /// sotcport: [cpu_addr, +size) may have become CPU-modified: its 16 MiB high pages are marked
+    /// in a bitmap (cpu_dirty) that BufferCache::SynchronizeDmaBuffers takes, so it syncs those
+    /// pages only instead of scanning all resident memory (the scan ran at nearly every draw with
+    /// DMA access while the camera turned: ~110,000 write faults a second keep some memory always
+    /// modified; ~8% of the draw recording thread, 2026-10-19). Also bumps cpu_marks.
+    void NoteCpuDirty(VAddr cpu_addr, u64 size) noexcept {
+        if (size == 0) {
+            return;
+        }
+        const u64 first = cpu_addr >> HIGHER_PAGE_BITS;
+        const u64 last = std::min<u64>((cpu_addr + size - 1) >> HIGHER_PAGE_BITS,
+                                       NUM_HIGH_PAGES - 1);
+        for (u64 page = first; page <= last; ++page) {
+            cpu_dirty[page / 64].fetch_or(u64{1} << (page % 64), std::memory_order_release);
+        }
         cpu_marks.fetch_add(1, std::memory_order_release);
+    }
+
+    /// sotcport: calls func(address, size) for every high page marked by NoteCpuDirty since the
+    /// last call, clearing the marks first (a write marking again meanwhile is seen next time).
+    template <typename Func>
+    void TakeCpuDirty(Func&& func) {
+        for (u64 word = 0; word < cpu_dirty.size(); ++word) {
+            if (cpu_dirty[word].load(std::memory_order_relaxed) == 0) {
+                continue;
+            }
+            u64 bits = cpu_dirty[word].exchange(0, std::memory_order_acq_rel);
+            while (bits) {
+                const u64 page = word * 64 + std::countr_zero(bits);
+                bits &= bits - 1;
+                func(page << HIGHER_PAGE_BITS, HIGHER_PAGE_SIZE);
+            }
+        }
     }
 
     /// sotcport: changes whenever memory may have become CPU-modified (see
@@ -73,7 +113,7 @@ public:
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
             manager->ExtendWriteFault(offset, size);
         });
-        cpu_marks.fetch_add(1, std::memory_order_release);
+        NoteCpuDirty(cpu_addr, size);
     }
 
     /// Removes all protection from a page and ensures GPU data has been flushed if requested
@@ -93,7 +133,7 @@ public:
             should_flush |= modified;
             manager->Unlock(bounds);
         });
-        cpu_marks.fetch_add(1, std::memory_order_release);
+        NoteCpuDirty(cpu_addr, size);
         if (should_flush) {
             on_flush();
         }
@@ -192,7 +232,7 @@ private:
         new_manager->SetCpuAddress(base_cpu_addr);
         free_managers.pop_back();
         top_tier[page_index] = new_manager;
-        cpu_marks.fetch_add(1, std::memory_order_release); // starts with every page CPU-modified
+        NoteCpuDirty(base_cpu_addr, HIGHER_PAGE_SIZE); // starts with every page CPU-modified
         return new_manager;
     }
 
@@ -202,6 +242,7 @@ private:
     std::vector<RegionManager*> free_managers;
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
     std::atomic<u64> cpu_marks{1}; ///< sotcport: see CpuMarks
+    std::array<std::atomic<u64>, NUM_HIGH_PAGES / 64> cpu_dirty{}; ///< sotcport: NoteCpuDirty
 };
 
 } // namespace VideoCore

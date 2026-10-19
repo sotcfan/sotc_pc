@@ -545,12 +545,22 @@ void BufferCache::SynchronizeDmaBuffers() {
         return;
     }
     dma_synced_marks = marks;
-    for (const auto& range : resident_ranges) {
-        const u64 page = range.start >> (ARENA_PAGE_BITS - block_shift);
-        const VAddr device_addr = range.start << block_shift;
-        const u64 size = (range.end - range.start) << block_shift;
-        SynchronizeMemory(address_space[page], device_addr, size, false, false);
-    }
+    // sotcport: only the high pages marked CPU-dirty since the last time (NoteCpuDirty), where
+    // they are resident (what becomes resident is marked too, EnsureResident).
+    memory_tracker->TakeCpuDirty([this](VAddr dirty_addr, u64 dirty_size) {
+        const u64 first_block = dirty_addr >> block_shift;
+        const u64 end_block = (dirty_addr + dirty_size) >> block_shift;
+        resident_ranges.ForEachInRange(first_block, end_block, [&](const Backing& backing) {
+            const u64 start = std::max(first_block, backing.start);
+            const u64 end = std::min(end_block, backing.end);
+            if (start >= end) {
+                return;
+            }
+            const u64 page = start >> (ARENA_PAGE_BITS - block_shift);
+            SynchronizeMemory(address_space[page], start << block_shift,
+                              (end - start) << block_shift, false, false);
+        });
+    });
 }
 
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
@@ -644,7 +654,9 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset >> block_shift;
         resident_ranges.Add(backing);
-        memory_tracker->NoteCpuMarks(); // sotcport: see SynchronizeDmaBuffers
+        // sotcport: see SynchronizeDmaBuffers
+        memory_tracker->NoteCpuDirty(range.start << block_shift,
+                                     (range.end - range.start) << block_shift);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
