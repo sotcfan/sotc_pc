@@ -24,6 +24,7 @@
 #include "diag/freeze_watch.h"
 #include "diag/memory_types.h"
 #include "diag/packet_stats.h"
+#include "game/frame_step.h"
 #include "hle/kernel/filesystem.h"
 #include "hle/savedata/savedata.h"
 #include "gpu/gpu.h"
@@ -188,6 +189,7 @@ int main(int argc, char** argv) {
         diag::InstallPacketStats();  // SOTC_PACKET_STATS
         diag::InstallMemoryTypes();  // SOTC_MEMORY_TYPES
         input::InstallGameHooks();   // split actions (src/input/game_hooks.cpp)
+        game::InstallFrameStep();    // the step of time per frame and the physics
         diag::InstallCameraProbe();  // SOTC_PROBE_CAMERA (TEMP)
         diag::InstallDataWatch();    // SOTC_WATCH_DATA
         linker.Link(eboot);

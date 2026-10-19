@@ -40,21 +40,25 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 
 ## Frame rate
 
-**Play at a steady 30 FPS** (`SOTC_FPS_LIMIT=30`); 60 is experimental.
+The game paces itself at 30 FPS, or at 60 with `SOTC_NEO_MODE=1` (the PS4 Pro's official 60 FPS
+mode, played through the whole game on 2026-10-13). `SOTC_FPS_LIMIT` and `SOTC_UNCAPPED` change that.
 
-- The game's physics (Wander's cape, Agro) steps at a fixed 1/60 s, so it only behaves at a steady
-  30 or 60 FPS. Other rates, even perfectly steady ones (40, 45), make the cape whip around and
-  Agro overshoot.
-- At 60 FPS the physics is fine, but the game's logic is not: an original PS4 never runs it at 60,
-  and some of it breaks (the fifth colossus flies straight up out of its arena). `SOTC_NEO_MODE=1`
-  (the PS4 Pro, which has an official 60 FPS mode) may fix that; inconclusive.
-- 60 FPS is also not always reached: in heavy scenes the GPU layer cannot keep up.
+- On an original PS4 the game's logic breaks at 60 (the fifth colossus flies straight up out of its
+  arena): for anything above 30, use `SOTC_NEO_MODE=1`.
+- The game moved its physics (Wander's cape, Agro) by a fixed 1/60 s per frame while the world moved
+  by the measured frame time, so only a steady 30 or 60 behaved: at other rates, or with an uneven
+  frame time, the cape whipped around and Agro overshot. sotcport now gives the physics the frame's
+  step, and smooths that step (`src/game/frame_step.cpp`), so any frame rate should behave
+  (2026-10-19; being checked in play).
 
 | Variable | What it does |
 |---|---|
-| `SOTC_FPS_LIMIT=<n>` | Frame limiter with even frame pacing. With a list, it starts at the first rate, drops to the next when frames keep missing the beat, and climbs back after a while with room to spare. A single value (`=30`) holds that rate. Use 30 (recommended) or 60 (experimental) only. For 60, add `SOTC_NEO_MODE=1`: the game's official 60 FPS mode is the PS4 Pro's (whether that fixes all of its logic at 60 is not confirmed yet). |
-| `SOTC_UNCAPPED=1` | No frame rate cap: flips are presented at once and the 60 Hz vblank only drives the game's events. For measuring; the physics misbehaves. |
+| `SOTC_FPS_LIMIT=<n>` | Frame limiter with even frame pacing. With a list, it starts at the first rate, drops to the next when frames keep missing the beat, and climbs back after a while with room to spare. A single value (`=60`) holds that rate. Above 30, add `SOTC_NEO_MODE=1`. |
+| `SOTC_UNCAPPED=1` | No frame rate cap: flips are presented at once and the 60 Hz vblank only drives the game's events. |
 | `SOTC_NEO_MODE=1` | Tells the game it runs on a PS4 Pro, where it officially supports 60 FPS. On an original PS4 the game logic breaks at 60 (the fifth colossus flies out of its arena). Experimental. |
+| `SOTC_GAME_STEP=game` | Keeps the game's own step of time per frame instead of the smoothed one. The game's step is a whole number of half-frames (8.34 ms at 60): at 85 FPS it jumps between 8.34 and 16.68 ms from one frame to the next, and above 120 FPS some frames get none. |
+| `SOTC_PHYSICS_STEP=nominal` | Moves the physics by a fixed 1/60 s per frame (1/30 in the 30 FPS mode), as the game does, instead of by the frame's step. |
+| `SOTC_LOG_FRAME_STEP=1` | Logs every frame: the measured frame time, the game's step, the step given to the game and the physics step. |
 | `SOTC_FLIP_RATE=0` | Ignores the game's own request for 30 FPS (`sceVideoOutSetFlipRate`). Older way to uncap; `SOTC_FPS_LIMIT` paces frames better. |
 
 ## GPU layer: performance switches
