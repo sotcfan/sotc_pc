@@ -2563,7 +2563,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                // sotcport: the game binds many read-only buffers without a real size
+                // (num_records ~4 GiB: no bounds on the console), each draw pointing the base at
+                // its own data. Clamped to the end of their mapping, some covered 161 MB and
+                // 2.7 GB of memory, all of it made resident in VRAM and kept up to date with the
+                // CPU's writes: a 4 GB card ran out of VRAM and paged (2026-10-19, GTX 1650). They
+                // get a window from their base instead, far more than a draw reads: Pro mode on
+                // the GTX 1650 27 -> 39 FPS, same image at a still scene.
+                // SOTC_UNBOUNDED_WINDOW=<MB> sets it (0: the whole mapping, as before).
+                static const u64 unbounded_window = [] {
+                    const char* mb = std::getenv("SOTC_UNBOUNDED_WINDOW");
+                    return (mb ? std::strtoull(mb, nullptr, 0) : u64{64}) << 20;
+                }();
+                if (unbounded_window && !desc.is_written && vsharp.GetSize() >= (u64{1} << 30)) {
+                    size = std::min(size, unbounded_window);
+                }
                 if (size != vsharp.GetSize()) {
                     // sotcport: the game binds buffers without a real size (num_records of
                     // ~4 GiB) thousands of times a second; say it once per shader.
