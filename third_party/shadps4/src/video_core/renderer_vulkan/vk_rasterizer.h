@@ -188,9 +188,17 @@ private:
                             const IndirectDraw& indirect);
     void DispatchRecord(const ComputePipeline* pipeline);
     /// sotcport: computes on the CPU, as the packet is processed, what the game's buffer
-    /// fill/copy compute shader will write (see the .cpp). True when it did: the dispatch still
-    /// runs on the GPU, with its destination not tracked as GPU-modified (shadow_dispatch).
+    /// fill/copy compute shader will write (see the .cpp). True when it did: the GPU then gets
+    /// the same bytes (PostShadowResult) instead of running the copy, except for a dispatch
+    /// sampled by SOTC_VERIFY_SHADOW_COPY, which runs with its destination not tracked as
+    /// GPU-modified (shadow_dispatch).
     bool ShadowCopyShader(const ComputePipeline* pipeline);
+    /// sotcport: hands the bytes ShadowCopyShader computed (shadow_result, at
+    /// shadow_result_address) to the GPU's memory, in order with the packets around.
+    void PostShadowResult();
+    void WriteShadowResult(VAddr address, std::span<const u32> words);
+    VAddr shadow_result_address = 0;
+    std::vector<u32> shadow_result;
     void VerifyShadowCopy();
     bool shadow_dispatch = false; ///< the dispatch being recorded was shadowed on the CPU
     VAddr shadow_verify_address = 0;          ///< SOTC_VERIFY_SHADOW_COPY: copy to compare

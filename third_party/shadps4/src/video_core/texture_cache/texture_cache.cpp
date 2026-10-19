@@ -154,7 +154,7 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
             // Untrack the image, so that the range is unprotected and the guest can write freely.
             image.flags |= ImageFlagBits::CpuDirty;
-            image.invalidations++; // sotcport: see Image::invalidations
+            image.invalidations.fetch_add(1, std::memory_order_release); // sotcport: see Image
             UntrackImage(image_id);
         } else if (pages_end < image_end) {
             // This page access may or may not modify the image.
@@ -781,8 +781,7 @@ void TextureCache::RefreshImage(Image& image, u64 invalidations_before) {
     perf::Scope perf_scope{perf::TextureUpload}; // sotcport TEMP
     // sotcport: invalidations seen before guest memory is read (see the end).
     if (invalidations_before == ~u64{0}) {
-        std::scoped_lock lk{image.mutex};
-        invalidations_before = image.invalidations;
+        invalidations_before = image.invalidations.load(std::memory_order_acquire);
     }
 
     const u32 num_layers = image.info.resources.layers;
@@ -871,11 +870,7 @@ void TextureCache::VerifyImage(ImageId image_id) {
         True(image.flags & (ImageFlagBits::Dirty | ImageFlagBits::GpuModified))) {
         return;
     }
-    u64 invalidations;
-    {
-        std::scoped_lock lk{image.mutex};
-        invalidations = image.invalidations;
-    }
+    const u64 invalidations = image.invalidations.load(std::memory_order_acquire);
     const u64 hash =
         Core::Memory::Instance()->HashBacking(image.info.guest_address, image.info.guest_size);
     if (hash == image.upload_hash) {
@@ -895,7 +890,7 @@ void TextureCache::VerifyImage(ImageId image_id) {
                     image.info.guest_address, image.info.guest_address + image.info.guest_size,
                     image.info.size.width, image.info.size.height, image.info.resources.levels,
                     vk::to_string(image.info.pixel_format), stale, image.track_addr,
-                    image.track_addr_end, image.invalidations,
+                    image.track_addr_end, image.invalidations.load(),
                     hle::kernel::DescribeAliases(image.info.guest_address, image.info.guest_size));
         // Which pages changed, and the mapping events there.
         std::string changed;

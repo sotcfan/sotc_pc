@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <mutex>
 #include <optional>
 
@@ -130,11 +132,13 @@ public:
     vk::ImageAspectFlags aspect_mask = vk::ImageAspectFlagBits::eColor;
     vk::SampleCountFlags supported_samples = vk::SampleCountFlagBits::e1;
     ImageFlagBits flags = ImageFlagBits::Dirty;
-    /// sotcport: how many times the CPU side marked the image modified (under `mutex`).
-    /// RefreshImage compares it before and after an upload: a mark that arrives while the
-    /// upload reads guest memory (another thread mapping or writing it) must survive the upload
-    /// clearing the dirty flags.
-    u64 invalidations = 0;
+    /// sotcport: how many times the CPU side marked the image modified (incremented under
+    /// `mutex`). RefreshImage compares it before and after an upload: a mark that arrives while
+    /// the upload reads guest memory (another thread mapping or writing it) must survive the
+    /// upload clearing the dirty flags. Atomic so that the snapshot before an upload needs no
+    /// lock: UpdateImage took `mutex` for it at every texture bind, and that lock's cache line,
+    /// shared with threads invalidating images, cost stage B ~10% of its time (2026-10-19).
+    std::atomic<u64> invalidations = 0;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     ImageId depth_id{};

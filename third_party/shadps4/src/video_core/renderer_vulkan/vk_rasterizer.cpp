@@ -698,6 +698,11 @@ void Rasterizer::DispatchDirect() {
         return;
     }
     const bool shadowed = ShadowCopyShader(pipeline); // sotcport
+    if (shadowed && !shadow_verify_address) {
+        // sotcport: the GPU gets the bytes the CPU computed instead of running the copy.
+        PostShadowResult();
+        return;
+    }
     if (UseDrawPipe()) {
         next_packet_shadowed = shadowed;
         PostPacket(PacketKind::Dispatch, pipeline, false, 0, nullptr);
@@ -710,6 +715,45 @@ void Rasterizer::DispatchDirect() {
     if (shadowed && shadow_verify_address) {
         VerifyShadowCopy();
     }
+}
+
+void Rasterizer::PostShadowResult() {
+    // A copy from the CPU's result (vkCmdUpdateBuffer) where the dispatch would have run: in
+    // stream order on stage B, or right here without the two-stage pipeline. The GPU's memory
+    // then holds exactly what the CPU computed and the SRT walker reads, by construction. When
+    // the GPU ran the copy itself, its source could differ from the one the CPU read (an older
+    // value the GPU's memory had not received yet), and the two copies of the destination
+    // diverged: groups of objects blinked after the bridge cutscene before the last colossus
+    // (2026-10-14), one copy in 755,000 at start-up in the forest (2026-10-19).
+    if (!UseDrawPipe()) {
+        WriteShadowResult(shadow_result_address, shadow_result);
+        return;
+    }
+    static std::vector<u8> payload;
+    const u32 bytes = static_cast<u32>(shadow_result.size() * sizeof(u32));
+    payload.resize(sizeof(VAddr) + sizeof(u32) + bytes);
+    std::memcpy(payload.data(), &shadow_result_address, sizeof(VAddr));
+    std::memcpy(payload.data() + sizeof(VAddr), &bytes, sizeof(u32));
+    std::memcpy(payload.data() + sizeof(VAddr) + sizeof(u32), shadow_result.data(), bytes);
+    PostTask(
+        [](Rasterizer& self, const u8* raw) {
+            VAddr address;
+            u32 bytes;
+            std::memcpy(&address, raw, sizeof(VAddr));
+            std::memcpy(&bytes, raw + sizeof(VAddr), sizeof(u32));
+            // The payload sits in the ring, 8-byte aligned: the words can be read in place.
+            const auto* words = reinterpret_cast<const u32*>(raw + sizeof(VAddr) + sizeof(u32));
+            self.WriteShadowResult(address, {words, bytes / sizeof(u32)});
+        },
+        payload.data(), static_cast<u32>(payload.size()));
+}
+
+void Rasterizer::WriteShadowResult(VAddr address, std::span<const u32> words) {
+    // Written, but not GPU-modified: CPU memory already holds the same bytes (shadowed).
+    const auto [buffer, offset] =
+        buffer_cache.ObtainBuffer(address, static_cast<u32>(words.size_bytes()), true, false,
+                                  true);
+    runtime.UpdateBuffer(buffer, offset, words);
 }
 
 void Rasterizer::VerifyShadowCopy() {
@@ -766,19 +810,18 @@ void Rasterizer::VerifyShadowCopy() {
 // for the GPU (a readback: drain, submit, wait, ~0.5 ms; ~1,000 per second, almost all of the
 // SRT walker's readbacks in the benchmark scene). So the CPU computes the same bytes as the
 // packet is processed, in packet order, and writes them to guest memory: the walker reads
-// current data. The GPU still runs the copy (its copy of memory gets the same bytes in GPU order,
-// for work recorded before and after), without marking them GPU-modified.
+// current data. The GPU's memory gets the same bytes in GPU order (PostShadowResult), without
+// marking them GPU-modified: the copy itself no longer runs on the GPU.
 // Only when the inputs are current in CPU memory (nothing GPU-written or still queued for stage
-// B), the formats copy bits unchanged, and the dispatch has the shape the code relies on.
-// SOTC_NO_SHADOW_COPY=1 turns it off (A/B measurements).
+// B, not inside a cached image: images the GPU draws into are not tracked as GPU-modified
+// buffers), the formats copy bits unchanged, and the dispatch has the shape the code relies on.
+// +20% frame rate in the forest (2026-10-19). SOTC_NO_SHADOW_COPY=1 turns it off (A/B).
 bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     constexpr u64 FillCopyShaderHash = 0x50784801;
-    // sotcport: off by default since 2026-10-14: after the bridge cutscene before the last
-    // colossus, groups of objects (plants, rocks, trees) blinked in and out with it on and
-    // stayed with it off (F7 sequence in the player's game). SOTC_SHADOW_COPY=1 turns it on
-    // until the cause is known (SOTC_VERIFY_SHADOW_COPY=1 there).
-    static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr ||
-                                 std::getenv("SOTC_SHADOW_COPY") == nullptr;
+    // sotcport: off from 2026-10-14 to 2026-10-19: after the bridge cutscene before the last
+    // colossus, groups of objects blinked with it on (the GPU's own copy could diverge from the
+    // CPU's; now the GPU gets the CPU's bytes, see PostShadowResult).
+    static const bool disabled = std::getenv("SOTC_NO_SHADOW_COPY") != nullptr;
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     if (disabled || diag::On(diag::ShadowCopyOff) || cs.pgm_hash != FillCopyShaderHash) {
         return false;
@@ -830,7 +873,8 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
                              !PendingWriteOverlaps(address, size) &&
                              !buffer_cache.AreBytesGpuModified(address, size));
     };
-    if (!current(ctl.base_address, sizeof(control)) || !current(src_address, src_bytes)) {
+    if (!current(ctl.base_address, sizeof(control)) || !current(src_address, src_bytes) ||
+        texture_cache.FindImageFromRange(src_address, src_bytes, false)) {
         return false;
     }
     memory->CopySparseMemory(ctl.base_address, reinterpret_cast<u8*>(control.data()),
@@ -842,7 +886,7 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
     // Only small copies: the tables the SRT walker reads are a few KiB; big fills (clearing
     // buffers, up to hundreds of KiB) would only cost CPU time here.
     constexpr u64 MaxShadowBytes = 16_KB;
-    if (count == 0 || period == 0 || dst_bytes > MaxShadowBytes ||
+    if (count == 0 || period == 0 || dst_bytes > MaxShadowBytes || dst_address % 4 != 0 ||
         hle::kernel::ClampToMapped(dst_address, dst_bytes) != dst_bytes ||
         (dst_address < src_address + src_bytes && src_address < dst_address + dst_bytes)) {
         return false;
@@ -863,6 +907,8 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
         result[i] = index < source.size() ? source[index] : 0;
     }
     memory->TryWriteBacking(reinterpret_cast<void*>(dst_address), result.data(), dst_bytes);
+    shadow_result_address = dst_address;
+    shadow_result.assign(result.begin(), result.end());
     perf::NoteShadowCopy(dst_bytes); // sotcport TEMP
     if (verify_interval && (verify_counter++ % verify_interval) == 0) {
         shadow_verify_address = dst_address;

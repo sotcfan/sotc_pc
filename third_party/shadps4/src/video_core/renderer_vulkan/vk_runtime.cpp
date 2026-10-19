@@ -154,6 +154,24 @@ void Runtime::FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32
                  vk::AccessFlagBits2::eTransferWrite);
 }
 
+void Runtime::UpdateBuffer(const VideoCore::Buffer* dst, u64 offset,
+                           std::span<const u32> words) {
+    scheduler.EndRendering();
+    const u64 size = words.size_bytes();
+    if (IsBufferAccessed(dst, offset, size, true)) {
+        FlushBarriers();
+    }
+    // sotcport: recorded through Scheduler::Record (threaded recording); the words are copied
+    // into the recording's storage.
+    const auto recorded = scheduler.RecordData(words);
+    scheduler.Record([buffer = dst->Handle(), offset, size,
+                      data = recorded.data()](vk::CommandBuffer cmdbuf) {
+        cmdbuf.updateBuffer(buffer, offset, size, data);
+    });
+    AccessBuffer(dst, offset, size, vk::PipelineStageFlagBits2::eCopy,
+                 vk::AccessFlagBits2::eTransferWrite);
+}
+
 void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
     scheduler.EndRendering();
 

@@ -38,6 +38,9 @@ public:
                     std::span<const vk::BufferCopy> copies);
 
     void FillBuffer(const VideoCore::Buffer* dst, u64 offset, u64 size, u32 value);
+    /// sotcport: writes `words` into dst at `offset` (4-byte aligned, at most 64 KiB) in
+    /// recording order (vkCmdUpdateBuffer).
+    void UpdateBuffer(const VideoCore::Buffer* dst, u64 offset, std::span<const u32> words);
 
     void InlineData(VideoCore::Buffer* dst, u64 offset, u32 value);
 

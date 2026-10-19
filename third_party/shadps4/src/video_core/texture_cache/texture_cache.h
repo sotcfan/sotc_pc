@@ -162,11 +162,7 @@ public:
         // (RefreshImage's own snapshot): a game write landing between TrackImage and that
         // snapshot untracked the image without counting as new, the upload then left it clean,
         // and once tracked again it kept old contents for good.
-        u64 invalidations_before;
-        {
-            std::scoped_lock lk{image.mutex};
-            invalidations_before = image.invalidations;
-        }
+        const u64 invalidations_before = image.invalidations.load(std::memory_order_acquire);
         TrackImage(image_id);
         RefreshImage(image, invalidations_before);
     }
