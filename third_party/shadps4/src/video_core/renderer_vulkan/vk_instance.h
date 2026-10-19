@@ -545,6 +545,8 @@ private:
     bool image_view_min_lod{};
     bool shader_clock{};
     bool supports_memory_budget{};
+    bool memory_priority{};              // sotcport: VK_EXT_memory_priority
+    bool pageable_device_local_memory{}; // sotcport: VK_EXT_pageable_device_local_memory
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;

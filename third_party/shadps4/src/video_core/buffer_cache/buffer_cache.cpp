@@ -661,7 +661,19 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .allocationSize = resident_blocks << block_shift,
         .memoryTypeIndex = arena_memory_type_index,
     };
-    const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    auto allocated = instance.GetDevice().allocateMemory(alloc_info);
+    // sotcport: say how much was asked and how full the VRAM was before failing (4 GB cards).
+    if (allocated.result != vk::Result::eSuccess) {
+        VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(instance.GetAllocator(), budgets);
+        LOG_CRITICAL(Render,
+                     "arena allocation of {} MB failed: {}; heap 0: {} MB used of a {} MB "
+                     "budget, {} MB of it in the allocator's blocks",
+                     alloc_info.allocationSize >> 20, vk::to_string(allocated.result),
+                     budgets[0].usage >> 20, budgets[0].budget >> 20,
+                     budgets[0].statistics.blockBytes >> 20);
+    }
+    const auto device_memory = Vulkan::Check(std::move(allocated));
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
