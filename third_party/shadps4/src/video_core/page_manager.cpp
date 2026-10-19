@@ -332,7 +332,26 @@ struct PageManager::Impl {
         };
 
         for (u64 page = page_start; page != page_end; ++page) {
+            // Apply the change to the page state
+            const bool update_write = write_op != PageOp::None && write_mask.GetPage(page);
+            const bool update_read = read_op != PageOp::None && read_mask.GetPage(page);
             PageState* state = cached_pages.find(base_page + page);
+            if (!state && (update_write || update_read)) {
+                // sotcport: a page the buffer cache starts or stops watching that has no state
+                // yet (nothing mapped near it when the states were made: the table is filled per
+                // mapping). Skipping it left the region saying "watched" with no watcher counted;
+                // once the game mapped memory there the state was made with none, and the next
+                // stop asserted ("Not enough watchers", on a GTX 1650 loading into the game,
+                // 2026-10-19). The state is made now, so the count stays in step.
+                const VAddr page_addr = (base_page + page) << PM_PAGE_BITS;
+                EnsurePages(page_addr, page_addr + PM_PAGE_SIZE);
+                state = cached_pages.find(base_page + page);
+                static std::atomic<u32> reported{0};
+                if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_WARNING(Render, "page {:#x}: watchers changed before it had a state",
+                                page_addr);
+                }
+            }
             if (!state) {
                 continue;
             }
@@ -344,9 +363,6 @@ struct PageManager::Impl {
                 perms = old_perms;
             }
 
-            // Apply the change to the page state
-            const bool update_write = write_op != PageOp::None && write_mask.GetPage(page);
-            const bool update_read = read_op != PageOp::None && read_mask.GetPage(page);
             const auto new_perms = state->Update(write_op, update_write, read_op, update_read);
 
             if (new_perms != perms) [[unlikely]] {
