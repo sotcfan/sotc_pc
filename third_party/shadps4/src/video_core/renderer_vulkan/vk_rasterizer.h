@@ -379,12 +379,12 @@ private:
         /// CPU-modified (nothing to upload), no GPU-written range was taken back (its writes
         /// are still marked) and nothing was recorded in between (no new hazard).
         bool compute = false;
+        std::array<u32, 3> dims{}; ///< the dispatch's size (CsRegs)
         u64 cpu_marks = 0;
         u64 gpu_removals = 0;
         u64 record_serial = ~u64{0};
     };
     BindMemo bind_memo;
-    std::vector<u32> bind_key;
 
     /// sotcport: indirect draws chained onto the one before them. The game draws runs of
     /// indirect draws that differ only in where their arguments are: the next 20 bytes of the
@@ -419,7 +419,6 @@ private:
     template <typename Visit>
     bool VisitBindKey(const Pipeline* pipeline, Visit&& visit);
     bool BindKeyMatches(const Pipeline* pipeline, bool& eligible);
-    void BuildBindKey(const Pipeline* pipeline);
     void ReuseBindings(const Pipeline* pipeline);
 
     u32 set_write_index{};

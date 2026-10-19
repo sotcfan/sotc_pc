@@ -138,14 +138,15 @@ struct RunCache {
     struct Run {
         u64 start = 0, end = 0;
     };
-    // sotcport: 64 (was 8): the GPU layer looks up every buffer it binds, a few dozen runs a
-    // frame, and with 8 they kept evicting each other (~6% of the draw recording thread).
-    std::array<Run, 64> runs{};
-    u32 next = 0;
-    // sotcport: the run of the last hit, tried first: a draw looks up the same few runs over and
-    // over, and scanning up to 64 entries each time was ~4% of the draw recording thread
-    // (2026-10-19).
-    u32 last = 0;
+    // sotcport: the run found for an address, kept in the slot of its 2 MiB granule: one look
+    // instead of a search. The GPU layer looks up every buffer it binds, several times per draw
+    // (a few dozen runs a frame); a list of 64 runs searched in order was ~4% of the draw
+    // recording thread, even trying the last hit first (2026-10-19).
+    static constexpr u32 GranuleBits = 21;
+    std::array<Run, 512> slots{};
+    Run& Slot(u64 address) {
+        return slots[(address >> GranuleBits) % slots.size()];
+    }
 };
 thread_local RunCache t_runs;
 
@@ -453,16 +454,8 @@ public:
         RunCache& cache = t_runs;
         const u64 generation = generation_.load(std::memory_order_acquire);
         if (cache.generation == generation) {
-            if (const auto& run = cache.runs[cache.last];
-                address - run.start < run.end - run.start) {
+            if (const auto& run = cache.Slot(address); address - run.start < run.end - run.start) {
                 return std::min(run.end - address, size);
-            }
-            for (u32 i = 0; i < cache.runs.size(); ++i) {
-                const auto& run = cache.runs[i];
-                if (address - run.start < run.end - run.start) {
-                    cache.last = i;
-                    return std::min(run.end - address, size);
-                }
             }
         } else {
             cache = {};
@@ -478,8 +471,7 @@ public:
             return 0;
         }
         if (generation_.load(std::memory_order_relaxed) == generation) {
-            cache.last = cache.next++ % cache.runs.size();
-            cache.runs[cache.last] = {it->first, it->second};
+            cache.Slot(address) = {it->first, it->second};
         }
         return std::min(it->second, address + size) - address;
     }

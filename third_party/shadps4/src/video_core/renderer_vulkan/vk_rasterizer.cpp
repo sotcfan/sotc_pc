@@ -1903,10 +1903,6 @@ void Rasterizer::OnFence(u32 reason) {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-        IsComputeImageClear(pipeline)) {
-        return false;
-    }
     // sotcport: ~70% of the draws bind exactly what the draw before them did (same pipeline,
     // buffers, textures, samplers and targets; only the flattened user data differs). Then the
     // descriptors of the previous draw are reused and only the per-draw parts are redone
@@ -1918,17 +1914,27 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     const bool compute = pipeline->IsCompute();
     const u64 cpu_marks = compute ? buffer_cache.CpuMarks() : 0;
     const u64 gpu_removals = compute ? buffer_cache.GpuModifiedRemovals() : 0;
+    const auto& cs = CsRegs();
+    const std::array<u32, 3> dims = compute ? std::array<u32, 3>{cs.dim_x, cs.dim_y, cs.dim_z}
+                                            : std::array<u32, 3>{};
     const bool memo_valid =
         bind_memo.packet + 1 == bind_packet &&
         bind_memo.texture_generation == texture_cache.RegistryGeneration() &&
         bind_memo.compute == compute &&
         (!compute || (bind_memo.cpu_marks == cpu_marks && bind_memo.gpu_removals == gpu_removals &&
-                      bind_memo.record_serial == scheduler.RecordSerial()));
+                      bind_memo.record_serial == scheduler.RecordSerial() &&
+                      bind_memo.dims == dims));
     const bool memo_hit = BindKeyMatches(pipeline, memo_eligible) && memo_valid;
     if (memo_hit) {
+        // The dispatch before, with the same bindings and sizes, was not one of the copies or
+        // clears done another way below (else it would have left no memo).
         ReuseBindings(pipeline);
         bind_memo.packet = bind_packet;
         return true;
+    }
+    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
+        IsComputeImageClear(pipeline)) {
+        return false;
     }
     bind_memo.packet = ~u64{0};
     memo_recording = memo_eligible;
@@ -1980,11 +1986,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             bind_memo.pipeline = pipeline;
             bind_memo.texture_generation = texture_cache.RegistryGeneration();
             bind_memo.compute = compute;
+            bind_memo.dims = dims;
             bind_memo.cpu_marks = cpu_marks;
             bind_memo.gpu_removals = gpu_removals;
             bind_memo.record_serial = ~u64{0}; // set once the dispatch is recorded
-            BuildBindKey(pipeline);
-            std::swap(bind_memo.key, bind_key);
+            // bind_memo.key holds this draw's key already (BindKeyMatches).
             bind_memo.bound_buffers.assign(bound_buffers.begin() + first_bound_buffer,
                                            bound_buffers.end());
             bind_memo.bound_images.assign(bound_images.begin() + first_bound_image,
@@ -2076,27 +2082,36 @@ bool Rasterizer::VisitBindKey(const Pipeline* pipeline, Visit&& visit) {
 }
 
 bool Rasterizer::BindKeyMatches(const Pipeline* pipeline, bool& eligible) {
-    // Compared in place with the kept key: no key is built for a draw that reuses.
+    // Compared in place with the kept key: no key is built for a draw that reuses. From the
+    // first difference on, the rest of this draw's key replaces the kept one's: the memo cannot
+    // serve this draw anyway, and if this draw leaves a memo, its key is ready (building it in a
+    // second pass, piece by piece, was ~2% of the draw recording thread, 2026-10-19).
+    auto& key = bind_memo.key;
     size_t at = 0;
     bool match = bind_memo.pipeline == pipeline;
+    if (!match) {
+        key.clear();
+    }
     eligible = VisitBindKey(pipeline, [&](const u32* words, size_t count) {
-        if (!match || at + count > bind_memo.key.size() ||
-            !std::equal(words, words + count, bind_memo.key.begin() + at)) {
+        if (match) {
+            if (at + count <= key.size() && std::equal(words, words + count, key.begin() + at)) {
+                at += count;
+                return true;
+            }
             match = false;
-            return false;
+            key.resize(at);
         }
-        at += count;
+        for (size_t i = 0; i < count; ++i) {
+            key.push_back(words[i]);
+        }
         return true;
     });
-    return eligible && match && at == bind_memo.key.size();
-}
-
-void Rasterizer::BuildBindKey(const Pipeline* pipeline) {
-    bind_key.clear();
-    VisitBindKey(pipeline, [&](const u32* words, size_t count) {
-        bind_key.insert(bind_key.end(), words, words + count);
-        return true;
-    });
+    if (match && at != key.size()) {
+        // This draw's key is a prefix of the kept one: not the same.
+        match = false;
+        key.resize(at);
+    }
+    return eligible && match;
 }
 
 void Rasterizer::ReuseBindings(const Pipeline* pipeline) {

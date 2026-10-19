@@ -511,7 +511,15 @@ public:
     // TEMP (two-stage draw pipeline): while the draw recording thread runs a packet
     // (pipe_busy), only it may record into this scheduler; anyone else is reported once.
     static inline std::atomic<const Scheduler*> pipe_busy{nullptr};
-    void CheckOwner() const;
+    /// sotcport: only with SOTC_CHECK_RECORDING_OWNER=1 (it ran for every recorded command,
+    /// ~1% of the draw recording thread).
+    static inline const bool check_owner = std::getenv("SOTC_CHECK_RECORDING_OWNER") != nullptr;
+    void CheckOwner() const {
+        if (check_owner) {
+            CheckOwnerSlow();
+        }
+    }
+    void CheckOwnerSlow() const;
 
     [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
         CheckOwner(); // TEMP

@@ -818,7 +818,7 @@ void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmd
 
 namespace Vulkan {
 // TEMP (two-stage draw pipeline): see Scheduler::pipe_busy.
-void Scheduler::CheckOwner() const {
+void Scheduler::CheckOwnerSlow() const {
     if (pipe_busy.load(std::memory_order_relaxed) != this || DrawPipe::OnStageB()) {
         return;
     }
