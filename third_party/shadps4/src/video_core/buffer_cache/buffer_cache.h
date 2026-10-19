@@ -123,6 +123,10 @@ public:
 
     /// sotcport: changes whenever memory may have become CPU-modified (MemoryTracker::CpuMarks).
     [[nodiscard]] u64 CpuMarks() const;
+    /// sotcport: changes whenever GPU-written ranges are taken back (see gpu_modified_removals).
+    [[nodiscard]] u64 GpuModifiedRemovals() const noexcept {
+        return gpu_modified_removals.load(std::memory_order_acquire);
+    }
 
     /// sotcport (diagnostics): copies what the GPU's arena holds for [device_addr, +size) into
     /// `out`, changing no state (waits for the GPU). False when it is not all resident.

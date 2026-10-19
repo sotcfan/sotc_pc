@@ -1092,6 +1092,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         cmdbuf.dispatch(x, y, z);
     });
     DebugState.IncDispatch();
+    if (bind_memo.packet == bind_packet) {
+        bind_memo.record_serial = scheduler.RecordSerial(); // sotcport: see BindMemo::compute
+    }
 
     ResetBindings(true);
     scheduler.KickRecording();
@@ -1150,6 +1153,9 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
         cmdbuf.dispatchIndirect(args, base);
     });
     DebugState.IncDispatch();
+    if (bind_memo.packet == bind_packet) {
+        bind_memo.record_serial = scheduler.RecordSerial(); // sotcport: see BindMemo::compute
+    }
 
     ResetBindings(true);
     scheduler.KickRecording();
@@ -1907,8 +1913,17 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // (ReuseBindings), as long as nothing ran in between (BindMemo::packet) and the texture
     // cache's registry is the same. SOTC_NO_BIND_MEMO=1 binds everything every time.
     bool memo_eligible = false;
-    const bool memo_valid = bind_memo.packet + 1 == bind_packet &&
-                            bind_memo.texture_generation == texture_cache.RegistryGeneration();
+    // sotcport: dispatches reuse bindings too, under stricter conditions (see BindMemo::compute):
+    // ~half of the game's dispatches bind exactly what the one before them bound.
+    const bool compute = pipeline->IsCompute();
+    const u64 cpu_marks = compute ? buffer_cache.CpuMarks() : 0;
+    const u64 gpu_removals = compute ? buffer_cache.GpuModifiedRemovals() : 0;
+    const bool memo_valid =
+        bind_memo.packet + 1 == bind_packet &&
+        bind_memo.texture_generation == texture_cache.RegistryGeneration() &&
+        bind_memo.compute == compute &&
+        (!compute || (bind_memo.cpu_marks == cpu_marks && bind_memo.gpu_removals == gpu_removals &&
+                      bind_memo.record_serial == scheduler.RecordSerial()));
     const bool memo_hit = BindKeyMatches(pipeline, memo_eligible) && memo_valid;
     if (memo_hit) {
         ReuseBindings(pipeline);
@@ -1964,6 +1979,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             bind_memo.packet = bind_packet;
             bind_memo.pipeline = pipeline;
             bind_memo.texture_generation = texture_cache.RegistryGeneration();
+            bind_memo.compute = compute;
+            bind_memo.cpu_marks = cpu_marks;
+            bind_memo.gpu_removals = gpu_removals;
+            bind_memo.record_serial = ~u64{0}; // set once the dispatch is recorded
             BuildBindKey(pipeline);
             std::swap(bind_memo.key, bind_key);
             bind_memo.bound_buffers.assign(bound_buffers.begin() + first_bound_buffer,
@@ -1984,9 +2003,14 @@ bool Rasterizer::VisitBindKey(const Pipeline* pipeline, Visit&& visit) {
     // False when the draw cannot reuse bindings: only draws whose bindings are all read-only and
     // need nothing done per draw but the flattened user data and streamed buffers (no GDS, user
     // clip planes, DMA, storage, SRT patches). ~63% of the eligible draws reuse their bindings.
+    // Dispatches may write buffers (not images), see BindMemo::compute.
     static const bool disabled = std::getenv("SOTC_NO_BIND_MEMO") != nullptr;
-    if (disabled || diag::On(diag::BindMemoOff) || pipeline->IsCompute() ||
-        !DrawPipe::OnStageB()) {
+    // sotcport: dispatches too (BindMemo::compute), but not those whose writes the CPU computes
+    // (their buffers are not marked GPU-written: a different binding path).
+    static const bool no_compute = std::getenv("SOTC_NO_COMPUTE_MEMO") != nullptr;
+    const bool compute = pipeline->IsCompute();
+    if (disabled || diag::On(diag::BindMemoOff) || !DrawPipe::OnStageB() ||
+        (compute && (no_compute || shadow_dispatch))) {
         return false;
     }
     bool go_on = true;
@@ -2009,7 +2033,9 @@ bool Rasterizer::VisitBindKey(const Pipeline* pipeline, Visit&& visit) {
             return false;
         }
         for (const auto& desc : stage->buffers) {
-            if (desc.is_written) {
+            // A dispatch's written buffers are bound again as they were: the conditions of
+            // BindMemo::compute keep their state the same.
+            if (desc.is_written && !compute) {
                 return false;
             }
             if (desc.IsSpecial()) {

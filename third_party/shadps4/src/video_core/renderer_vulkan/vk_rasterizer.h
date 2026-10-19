@@ -373,6 +373,15 @@ private:
         std::vector<VideoCore::ImageId> bound_images; ///< added by BindResources
         std::vector<u8> lod_banks; ///< counter banks of its textures (NoteLodStatsBind)
         std::array<u8, Shader::NUM_BUFFERS> buf_offsets{};
+        /// Dispatches (they write buffers): BufferCache::CpuMarks and GpuModifiedRemovals before
+        /// it bound anything, and Scheduler::RecordSerial after its dispatch was recorded. A
+        /// dispatch reuses the bindings only if none of them changed since: no memory became
+        /// CPU-modified (nothing to upload), no GPU-written range was taken back (its writes
+        /// are still marked) and nothing was recorded in between (no new hazard).
+        bool compute = false;
+        u64 cpu_marks = 0;
+        u64 gpu_removals = 0;
+        u64 record_serial = ~u64{0};
     };
     BindMemo bind_memo;
     std::vector<u32> bind_key;
