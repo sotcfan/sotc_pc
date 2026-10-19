@@ -370,6 +370,7 @@ constexpr const char* SlotNames[NumSlots] = {
     "GpuComm busy", "Draw", "Dispatch", "Readback", "Scheduler::Wait", "New pipeline",
     "OnSubmit+Flush", "Invalidate (fault)", "Flip", "Wait: download", "Wait: stream buffer",
     "Wait: fault buffer", "Wait: image download", "Empty download", "Texture upload",
+    "Barrier", "Rendering end",
 };
 
 // The `limit` largest entries of `entries` (sorted by their first member), joined.

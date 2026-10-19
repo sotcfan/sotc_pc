@@ -112,6 +112,7 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
+    perf::Add(perf::RenderingEnd, 0); // sotcport TEMP
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 

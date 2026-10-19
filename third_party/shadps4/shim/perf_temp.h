@@ -24,6 +24,8 @@ enum Slot : int {
     WaitImageDownload,
     EmptyDownload,
     TextureUpload,
+    Barrier,       ///< TEMP (2026-10-19): pipeline barriers recorded (Runtime::FlushBarriers)
+    RenderingEnd,  ///< TEMP (2026-10-19): render passes ended (Scheduler::EndRendering)
     NumSlots,
 };
 

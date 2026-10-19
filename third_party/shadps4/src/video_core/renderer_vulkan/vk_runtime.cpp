@@ -788,6 +788,7 @@ void Runtime::FlushBarriers() {
     }
 
     scheduler.EndRendering();
+    perf::Add(perf::Barrier, 0); // sotcport TEMP
     // sotcport: recorded through Scheduler::Record (threaded recording): the image
     // barriers are copied into the recording block, the memory barrier travels by value.
     const auto images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>{
