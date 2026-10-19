@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <deque>
+#include <mutex>
 #include <vector>
 
 #include "common/types.h"
@@ -193,7 +194,9 @@ private:
         u64 page_offset = cpu_address & HIGHER_PAGE_MASK;
         while (remaining_size > 0) {
             const u64 copy_amount = std::min(HIGHER_PAGE_SIZE - page_offset, remaining_size);
-            if (auto* region = top_tier[page_index]; region) {
+            // sotcport: published by CreateRegion from another thread (see there).
+            auto* region = std::atomic_ref{top_tier[page_index]}.load(std::memory_order_acquire);
+            if (region) {
                 if constexpr (BOOL_BREAK) {
                     if (func(region, page_offset, copy_amount)) {
                         return true;
@@ -219,6 +222,17 @@ private:
     }
 
     RegionManager* CreateRegion(u64 page_index) {
+        // sotcport: both stages of the two-stage draw pipeline obtain buffers (stage A for DMA
+        // and copies, stage B for draws), so both can come to a 16 MiB page nobody used before.
+        // Unlocked, two threads could take the same manager off the free list for two different
+        // pages: one page's state then stood for the other's, the page watchers went out of step
+        // and an assertion stopped the game ("Not enough watchers", loading into the game on a
+        // GTX 1650, 2026-10-19). The manager is published only once it is ready.
+        std::scoped_lock lock{create_mutex};
+        auto* existing = std::atomic_ref{top_tier[page_index]}.load(std::memory_order_acquire);
+        if (existing) {
+            return existing; // another thread created it meanwhile
+        }
         const VAddr base_cpu_addr = page_index << HIGHER_PAGE_BITS;
         if (free_managers.empty()) {
             manager_pool.emplace_back();
@@ -231,8 +245,8 @@ private:
         auto* new_manager = free_managers.back();
         new_manager->SetCpuAddress(base_cpu_addr);
         free_managers.pop_back();
-        top_tier[page_index] = new_manager;
         NoteCpuDirty(base_cpu_addr, HIGHER_PAGE_SIZE); // starts with every page CPU-modified
+        std::atomic_ref{top_tier[page_index]}.store(new_manager, std::memory_order_release);
         return new_manager;
     }
 
@@ -240,6 +254,7 @@ private:
     const u32 readbacks_mode;
     std::deque<std::array<RegionManager, MANAGER_POOL_SIZE>> manager_pool;
     std::vector<RegionManager*> free_managers;
+    std::mutex create_mutex; // sotcport: see CreateRegion
     std::array<RegionManager*, NUM_HIGH_PAGES> top_tier{};
     std::atomic<u64> cpu_marks{1}; ///< sotcport: see CpuMarks
     std::array<std::atomic<u64>, NUM_HIGH_PAGES / 64> cpu_dirty{}; ///< sotcport: NoteCpuDirty
