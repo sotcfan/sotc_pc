@@ -587,9 +587,23 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             FilterDraw();
             return;
         }
+        // sotcport: see StageAChain.
+        static const bool no_chain = std::getenv("SOTC_NO_DRAW_CHAIN") != nullptr;
+        auto& chain = stage_a_chain;
+        if (!no_chain && chain.pipeline && chain.posted == posted_packets &&
+            chain.epoch == liverpool->chain_epoch && chain.is_indexed == is_indexed &&
+            chain.vertex_sgpr_offset == vertex_sgpr_offset &&
+            chain.instance_sgpr_offset == instance_sgpr_offset && !RegsChangedSincePost()) {
+            PostPacket(PacketKind::DrawIndirect, chain.pipeline, is_indexed, 0, &indirect);
+            chain.posted = posted_packets;
+            return;
+        }
+        chain.pipeline = nullptr;
         const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
         if (pipeline) {
             PostPacket(PacketKind::DrawIndirect, pipeline, is_indexed, 0, &indirect);
+            chain = {pipeline,           liverpool->chain_epoch, posted_packets,
+                     vertex_sgpr_offset, instance_sgpr_offset,   is_indexed};
         }
         return;
     }
@@ -610,6 +624,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                                     const IndirectDraw& indirect) {
     ++work_since_flush; // sotcport: see MaybeFlushEarly
+    if (TryChainIndirectDraw(pipeline, is_indexed, indirect)) {
+        return;
+    }
     const VAddr arg_address = indirect.arg_address;
     const VAddr count_address = indirect.count_address;
     const u32 offset = indirect.offset;
@@ -680,9 +697,113 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         }
     });
     DebugState.IncDrawCall();
+    StartIndirectChain(pipeline, is_indexed, indirect);
 
     ResetBindings(false);
     scheduler.KickRecording();
+}
+
+void Rasterizer::StartIndirectChain(const GraphicsPipeline* pipeline, bool is_indexed,
+                                    const IndirectDraw& indirect) {
+    // A draw can be chained onto this one if its bindings can be kept as they are: the binding
+    // memo holds them (read-only bindings that need nothing redone per draw but the flattened
+    // user data, which a chained draw must have the same), see BindResources.
+    auto& chain = indirect_chain;
+    chain.packet = ~u64{0};
+    if (!DrawPipe::OnStageB() || bind_memo.packet != bind_packet ||
+        indirect.count_address != 0 || !scheduler.IsRendering()) {
+        return;
+    }
+    chain.stage_bases.clear();
+    chain.user_data.clear();
+    for (u32 i = 0; i < Shader::Info::num_ud_snapshots; ++i) {
+        const auto& snapshot = Shader::Info::ud_snapshots[i];
+        if (!snapshot.patches.empty()) {
+            return;
+        }
+        chain.stage_bases.push_back(snapshot.pgm_base);
+        chain.stage_bases.push_back(snapshot.user_data.size());
+        chain.stage_bases.push_back(snapshot.flat.size());
+        chain.user_data.insert(chain.user_data.end(), snapshot.user_data.begin(),
+                               snapshot.user_data.end());
+        chain.user_data.insert(chain.user_data.end(), snapshot.flat.begin(), snapshot.flat.end());
+    }
+    chain.packet = bind_packet;
+    chain.pipeline = pipeline;
+    chain.record_serial = scheduler.RecordSerial();
+    chain.tick = scheduler.CurrentTick();
+    chain.args_end =
+        indirect.arg_address + indirect.offset + u64{indirect.stride} * indirect.max_count;
+    chain.stride = indirect.stride;
+    chain.is_indexed = is_indexed;
+}
+
+bool Rasterizer::TryChainIndirectDraw(const GraphicsPipeline* pipeline, bool is_indexed,
+                                      const IndirectDraw& indirect) {
+    static const bool disabled = std::getenv("SOTC_NO_DRAW_CHAIN") != nullptr;
+    auto& chain = indirect_chain;
+    // The draw before this one started or continued a chain, nothing ran or was recorded since
+    // (the command buffer, the render pass, the bound pipeline, descriptors and dynamic state
+    // are still the ones it left), no register changed its value, and this draw's arguments
+    // come right after its arguments.
+    const VAddr args = indirect.arg_address + indirect.offset;
+    if (disabled || !DrawPipe::OnStageB() || chain.packet + 1 != bind_packet ||
+        packet_regs_changed ||
+        chain.pipeline != pipeline || chain.is_indexed != is_indexed ||
+        indirect.count_address != 0 || indirect.stride != chain.stride || args != chain.args_end ||
+        chain.record_serial != scheduler.RecordSerial() || chain.tick != scheduler.CurrentTick() ||
+        !scheduler.IsRendering() || bind_memo.packet + 1 != bind_packet ||
+        bind_memo.texture_generation != texture_cache.RegistryGeneration()) {
+        return false;
+    }
+    // The same shaders with the same user data.
+    if (chain.stage_bases.size() != size_t{Shader::Info::num_ud_snapshots} * 3) {
+        return false;
+    }
+    size_t at = 0;
+    for (u32 i = 0; i < Shader::Info::num_ud_snapshots; ++i) {
+        const auto& snapshot = Shader::Info::ud_snapshots[i];
+        if (!snapshot.patches.empty() || chain.stage_bases[i * 3] != snapshot.pgm_base ||
+            chain.stage_bases[i * 3 + 1] != snapshot.user_data.size() ||
+            chain.stage_bases[i * 3 + 2] != snapshot.flat.size() ||
+            !std::equal(snapshot.user_data.begin(), snapshot.user_data.end(),
+                        chain.user_data.begin() + at) ||
+            !std::equal(snapshot.flat.begin(), snapshot.flat.end(),
+                        chain.user_data.begin() + at + snapshot.user_data.size())) {
+            return false;
+        }
+        at += snapshot.user_data.size() + snapshot.flat.size();
+    }
+    // The arguments, as the full path binds them (a barrier needed first: take that path).
+    const u32 size = indirect.stride * indirect.max_count;
+    const auto [buffer, base] = buffer_cache.ObtainBuffer(args, size, false);
+    if (runtime.IsBufferAccessed(buffer, base, size)) {
+        return false;
+    }
+    bound_buffers.emplace_back(buffer, base, size, vk::AccessFlagBits2::eIndirectCommandRead);
+    // What binding the textures again would have counted (see NoteLodStatsBind).
+    for (const u8 bank : bind_memo.lod_banks) {
+        ++lod_stats_binds[bank];
+    }
+    const vk::Buffer handle = buffer->Handle();
+    const u32 max_count = indirect.max_count;
+    const u32 stride = indirect.stride;
+    scheduler.Record([is_indexed, handle, base, max_count, stride](vk::CommandBuffer cmdbuf) {
+        if (is_indexed) {
+            cmdbuf.drawIndexedIndirect(handle, base, max_count, stride);
+        } else {
+            cmdbuf.drawIndirect(handle, base, max_count, stride);
+        }
+    });
+    DebugState.IncDrawCall();
+    chain.packet = bind_packet;
+    chain.record_serial = scheduler.RecordSerial();
+    chain.args_end = args + size;
+    // The bindings are still the memo's: a draw after this one may reuse them as well.
+    bind_memo.packet = bind_packet;
+    ResetBindings(false);
+    scheduler.KickRecording();
+    return true;
 }
 
 void Rasterizer::DispatchDirect() {
@@ -1055,6 +1176,7 @@ struct PacketHeader {
     u8 full_regs;   ///< the whole register file follows the header (first packet)
     u8 verify;      ///< the live register file is appended for comparison
     u8 shadowed;    ///< sotcport: a dispatch whose writes the CPU computed (ShadowCopyShader)
+    u8 game_sync;   ///< sotcport: the game synchronized since the last packet (GuestWritesPending)
     const void* pipeline;
     u32 index_offset;
     u16 num_blocks;
@@ -1129,8 +1251,10 @@ void Rasterizer::DrainDrawPipe(u32 reason) {
     if (draw_pipe && !DrawPipe::OnStageB() && OnStageA()) {
         draw_pipe->Drain(reason);
         // sotcport: stage A may record work of its own now (readbacks, uploads): bindings kept
-        // by stage B for its next draw are no longer known to be current (see BindMemo).
+        // by stage B for its next draw are no longer known to be current (see BindMemo), nor is
+        // the pipeline kept for stage A's next indirect draw (see StageAChain).
         ++bind_packet;
+        ++posted_packets;
     }
 }
 
@@ -1275,6 +1399,7 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
     header.full_regs = full;
     header.verify = verify;
     header.shadowed = next_packet_shadowed;
+    header.game_sync = std::exchange(liverpool->game_sync_pending, false);
     header.pipeline = pipeline;
     header.index_offset = index_offset;
     header.num_blocks = static_cast<u16>(num_blocks);
@@ -1294,6 +1419,26 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
                     AmdGpu::RegDirty::BlockWords * sizeof(u32));
         out += AmdGpu::RegDirty::BlockWords * sizeof(u32);
     }
+    // sotcport: stage A's copy of what stage B now has (see RegsChangedSincePost).
+    if (full || !posted_regs) {
+        if (!posted_regs) {
+            posted_regs = std::make_unique<AmdGpu::Regs>();
+        }
+        std::memcpy(posted_regs.get(), &liverpool->regs, sizeof(AmdGpu::Regs));
+    } else {
+        if (header.regs_reset) {
+            posted_regs->SetDefaults();
+        }
+        for (u32 i = 0; i < num_blocks; ++i) {
+            const u32 word = blocks[i] * AmdGpu::RegDirty::BlockWords;
+            std::memcpy(posted_regs->reg_array.data() + word,
+                        liverpool->regs.reg_array.data() + word,
+                        AmdGpu::RegDirty::BlockWords * sizeof(u32));
+        }
+    }
+    posted_cb_extent = liverpool->last_cb_extent;
+    posted_db_extent = liverpool->last_db_extent;
+    ++posted_packets;
     for (const auto* stage : stages) {
         if (!stage) {
             continue;
@@ -1331,7 +1476,27 @@ void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_i
     draw_pipe->Commit(static_cast<u32>(out - start));
 }
 
+bool Rasterizer::RegsChangedSincePost() const {
+    const auto& dirty = liverpool->reg_dirty;
+    if (!pipe_synced || dirty.reset || !posted_regs ||
+        std::memcmp(&posted_cb_extent, &liverpool->last_cb_extent, sizeof(posted_cb_extent)) != 0 ||
+        std::memcmp(&posted_db_extent, &liverpool->last_db_extent, sizeof(posted_db_extent)) != 0) {
+        return true;
+    }
+    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
+         block = dirty.blocks._Find_next(block)) {
+        const u32 word = static_cast<u32>(block) * AmdGpu::RegDirty::BlockWords;
+        if (std::memcmp(posted_regs->reg_array.data() + word,
+                        liverpool->regs.reg_array.data() + word,
+                        AmdGpu::RegDirty::BlockWords * sizeof(u32)) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Rasterizer::PostTask(TaskFn run, const void* payload, u32 payload_size) {
+    ++posted_packets; // sotcport: see StageAChain
     const u32 size = sizeof(TaskHeader) + AlignPacket(payload_size);
     u8* out = draw_pipe->Begin(size);
     auto& header = *reinterpret_cast<TaskHeader*>(out);
@@ -1592,6 +1757,9 @@ void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
     auto& state = *self.pipe_state;
     const auto& header = *reinterpret_cast<const PacketHeader*>(data);
     const u8* in = data + sizeof(PacketHeader);
+    // sotcport: whether a register's value changes (blocks are sent when written, often with
+    // the same values again): see TryChainIndirectDraw.
+    self.packet_regs_changed = header.full_regs || header.regs_reset;
     if (header.full_regs) {
         std::memcpy(&state.regs, in, sizeof(AmdGpu::Regs));
         in += sizeof(AmdGpu::Regs);
@@ -1602,9 +1770,13 @@ void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
     const auto* blocks = reinterpret_cast<const u16*>(in);
     in += AlignPacket(header.num_blocks * sizeof(u16));
     for (u32 i = 0; i < header.num_blocks; ++i) {
-        std::memcpy(state.regs.reg_array.data() + blocks[i] * AmdGpu::RegDirty::BlockWords, in,
-                    AmdGpu::RegDirty::BlockWords * sizeof(u32));
-        in += AmdGpu::RegDirty::BlockWords * sizeof(u32);
+        u32* const block = state.regs.reg_array.data() + blocks[i] * AmdGpu::RegDirty::BlockWords;
+        constexpr u32 block_bytes = AmdGpu::RegDirty::BlockWords * sizeof(u32);
+        if (!self.packet_regs_changed && std::memcmp(block, in, block_bytes) != 0) {
+            self.packet_regs_changed = true;
+        }
+        std::memcpy(block, in, block_bytes);
+        in += block_bytes;
     }
     ASSERT(header.num_stages <= Shader::Info::MaxUdSnapshots);
     for (u32 i = 0; i < header.num_stages; ++i) {
@@ -1658,12 +1830,23 @@ void Rasterizer::RunPacket(void* context, const u8* data, u32 size) {
         }
     }
     ASSERT(static_cast<u32>(in - data) == size);
+    // sotcport: the target extents found by the command processor count as registers here.
+    if (!self.packet_regs_changed &&
+        (std::memcmp(&state.cb_extent, &header.cb_extent, sizeof(state.cb_extent)) != 0 ||
+         std::memcmp(&state.db_extent, &header.db_extent, sizeof(state.db_extent)) != 0)) {
+        self.packet_regs_changed = true;
+    }
     state.cb_extent = header.cb_extent;
     state.db_extent = header.db_extent;
     stage_state = &state;
 
     Scheduler::pipe_busy.store(&self.scheduler, std::memory_order_relaxed); // TEMP
     self.scheduler.PopPendingOperations();
+    // sotcport: where the game synchronizes, everything its shaders wrote before is made
+    // visible to what comes after (see Runtime::GuestWritesPending).
+    if (header.game_sync && self.runtime.GuestWritesPending()) {
+        self.runtime.FlushBarriers();
+    }
     switch (kind) {
     case PacketKind::Draw:
         self.DrawRecord(static_cast<const GraphicsPipeline*>(header.pipeline), header.is_indexed,
@@ -2099,10 +2282,10 @@ void Rasterizer::ResetBindings(bool is_compute) {
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
-    for (const auto [buffer, offset, size, src_access] : bound_buffers) {
+    for (const auto [buffer, offset, size, src_access, guest] : bound_buffers) {
         const auto dst_stage = is_compute ? vk::PipelineStageFlagBits2::eComputeShader
                                           : vk::PipelineStageFlagBits2::eAllGraphics;
-        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access);
+        runtime.AccessBuffer(buffer, offset, size, dst_stage, src_access, guest);
     }
     bound_images.clear();
     bound_buffers.clear();
@@ -2360,7 +2543,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, src_access);
+                // sotcport: a game shader's own binding (see Runtime::AccessBuffer).
+                static const bool strict = std::getenv("SOTC_STRICT_BARRIERS") != nullptr;
+                const bool guest = !strict && DrawPipe::OnStageB();
+                bound_buffers.emplace_back(buffer, offset, size, src_access, guest);
                 // sotcport: a streamed copy is made again for every draw (see BindMemo).
                 if (memo_recording && buffer == &buffer_cache.GetStreamBuffer()) {
                     bind_memo.dynamics.push_back(
@@ -2373,7 +2559,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                needs_barrier |=
+                    runtime.IsBufferAccessed(buffer, offset, size, desc.is_written, guest);
             }
         }
 

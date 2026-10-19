@@ -326,6 +326,12 @@ public:
         return properties.limits.timestampPeriod;
     }
 
+    /// sotcport (SOTC_GPU_TIMING): VK_EXT_calibrated_timestamps is enabled.
+    bool HasCalibratedTimestamps() const {
+        return calibrated_timestamps_enabled;
+    }
+    bool calibrated_timestamps_enabled{};
+
     /// Returns the minimum required alignment for storage buffers
     vk::DeviceSize StorageMinAlignment() const {
         return properties.limits.minStorageBufferOffsetAlignment;

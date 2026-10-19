@@ -351,8 +351,12 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
-    const bool calibrated_timestamps =
-        TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // sotcport: also for SOTC_GPU_TIMING's frame timeline (GPU spans on the CPU's clock).
+    calibrated_timestamps_enabled =
+        (TRACY_GPU_ENABLED || std::getenv("SOTC_GPU_TIMING") != nullptr)
+            ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME)
+            : false;
+    const bool calibrated_timestamps = TRACY_GPU_ENABLED && calibrated_timestamps_enabled;
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {

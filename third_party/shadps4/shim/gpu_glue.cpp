@@ -396,6 +396,12 @@ uint64_t Now() {
 }
 
 void Add(Slot slot, uint64_t ns) {
+    // Some callers count events without a Scope (barriers, render pass ends...): without
+    // SOTC_PERF the shared counters would still cost an atomic add on a contended cache line on
+    // every call (~3% of the draw recording thread, 2026-10-19).
+    if (!g_enabled) {
+        return;
+    }
     g_count[slot].fetch_add(1, std::memory_order_relaxed);
     g_ns[slot].fetch_add(ns, std::memory_order_relaxed);
     if (g_spike_ms > 0) {
@@ -619,30 +625,60 @@ const int g_timeline_every = [] {
     return env ? std::max(1, std::atoi(env)) : 0;
 }();
 
-void Mark(char kind, uint64_t value) {
+void MarkAt(char kind, uint64_t ns, uint64_t value) {
     if (!g_timeline_every) {
         return;
     }
     const uint64_t index = g_timeline_next.fetch_add(1, std::memory_order_relaxed);
-    g_timeline[index % TimelineSize] = {Now(), kind, value};
+    g_timeline[index % TimelineSize] = {ns, kind, value};
+}
+
+void Mark(char kind, uint64_t value) {
+    if (!g_timeline_every) {
+        return;
+    }
+    const uint64_t now = Now();
+    const uint64_t index = g_timeline_next.fetch_add(1, std::memory_order_relaxed);
+    g_timeline[index % TimelineSize] = {now, kind, value};
     if (kind != 'P') {
         return;
     }
-    static uint64_t last_present = 0, frames = 0;
-    if (++frames % g_timeline_every == 0 && last_present && index - last_present < TimelineSize) {
-        const uint64_t t0 = g_timeline[last_present % TimelineSize].ns;
-        std::string text;
-        for (uint64_t i = last_present; i <= index; ++i) {
-            const auto& event = g_timeline[i % TimelineSize];
-            text += fmt::format(" {:.2f}{}", (event.ns - t0) / 1e6, event.kind);
-            if (event.value) {
-                text += fmt::format("({})", event.value);
-            }
-        }
-        LOG_INFO(Render, "TIMELINE frame {} ({:.2f} ms):{}", frames,
-                 (g_timeline[index % TimelineSize].ns - t0) / 1e6, text);
+    // Printed two frames late: events stamped with an earlier time than when they were stored
+    // (the GPU's command buffer spans, 'g' and 'G', collected after the GPU ran them) are in by
+    // then. A frame's events are the ones stamped between its two presents, in time order.
+    struct Present {
+        uint64_t index, ns;
+    };
+    static std::array<Present, 4> presents{};
+    static uint64_t frames = 0;
+    presents[frames % presents.size()] = {index, now};
+    ++frames;
+    if (frames < 4 || (frames - 2) % g_timeline_every != 0) {
+        return;
     }
-    last_present = index;
+    const Present begin = presents[(frames - 4) % presents.size()];
+    const Present end = presents[(frames - 3) % presents.size()];
+    if (index - begin.index >= TimelineSize) {
+        return;
+    }
+    std::vector<TimelineEvent> events;
+    for (uint64_t i = begin.index; i <= index; ++i) {
+        const auto& event = g_timeline[i % TimelineSize];
+        if (event.ns >= begin.ns && event.ns <= end.ns) {
+            events.push_back(event);
+        }
+    }
+    std::stable_sort(events.begin(), events.end(),
+                     [](const TimelineEvent& a, const TimelineEvent& b) { return a.ns < b.ns; });
+    std::string text;
+    for (const auto& event : events) {
+        text += fmt::format(" {:.2f}{}", (event.ns - begin.ns) / 1e6, event.kind);
+        if (event.value) {
+            text += fmt::format("({})", event.value);
+        }
+    }
+    LOG_INFO(Render, "TIMELINE frame {} ({:.2f} ms):{}", frames - 3, (end.ns - begin.ns) / 1e6,
+             text);
 }
 
 void NoteFrameForSpikes() {

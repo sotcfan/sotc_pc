@@ -126,6 +126,10 @@ struct Buffer {
     std::span<u8> mapped_data{};
     bool is_coherent{};
     MemoryType mem_type{MemoryType::DeviceLocal};
+    /// sotcport: GPU reads of this buffer need no barrier tracking (Runtime::AccessBuffer): set
+    /// for the buffer cache's stream buffer, where every use gets a fresh range that no earlier
+    /// GPU command reads (wrapping around waits for the GPU), so no later write can race a read.
+    bool untracked_reads{};
     UniqueBuffer buffer;
 };
 

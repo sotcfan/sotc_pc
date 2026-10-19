@@ -105,6 +105,43 @@ bool Liverpool::PipelinedComputeOpcode(PM4ItOpcode opcode) {
     }
 }
 
+bool Liverpool::GameSyncOpcode(PM4ItOpcode opcode, const u32* packet) {
+    switch (opcode) {
+    case PM4ItOpcode::AcquireMem:
+    case PM4ItOpcode::WaitRegMem:
+    case PM4ItOpcode::EventWrite:
+    case PM4ItOpcode::EventWriteEos:
+    case PM4ItOpcode::EventWriteEop:
+    case PM4ItOpcode::ReleaseMem:
+        return true;
+    case PM4ItOpcode::DmaData:
+        // Not the ~100k/s that write a register the handler skips (see PipelinedOpcode).
+        return reinterpret_cast<const PM4DmaData*>(packet)->dst_addr_lo != 0x3022C;
+    default:
+        return false;
+    }
+}
+
+bool Liverpool::ChainSafeOpcode(PM4ItOpcode opcode) {
+    switch (opcode) {
+    case PM4ItOpcode::SetContextReg:
+    case PM4ItOpcode::SetShReg:
+    case PM4ItOpcode::SetUconfigReg:
+    case PM4ItOpcode::SetConfigReg:
+    case PM4ItOpcode::IndexType:
+    case PM4ItOpcode::IndexBase:
+    case PM4ItOpcode::IndexBufferSize:
+    case PM4ItOpcode::NumInstances:
+    case PM4ItOpcode::SetBase:
+    case PM4ItOpcode::DrawIndirect:
+    case PM4ItOpcode::DrawIndexIndirect:
+    case PM4ItOpcode::Nop: // markers, padding; a flip drains (which breaks the chain anyway)
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool Liverpool::PipelinedOpcode(PM4ItOpcode opcode, const u32* packet) {
     switch (opcode) {
     case PM4ItOpcode::Nop: // debug markers only when guest markers are on (checked by the caller)
@@ -319,6 +356,7 @@ bool Liverpool::WaitRegMemMet(const PM4CmdWaitRegMem& wait) {
 void Liverpool::ProcessCommands() {
     // Process incoming commands with high priority
     while (num_commands) {
+        ++chain_epoch; // sotcport: see chain_epoch (readbacks, unmaps...)
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};
@@ -425,6 +463,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
     while (!ccb.empty()) {
         ProcessCommands();
+        ++chain_epoch; // sotcport: see chain_epoch
 
         const auto* header = reinterpret_cast<const PM4Header*>(ccb.data());
         const u32 type = header->type;
@@ -548,6 +587,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (!ChainSafeOpcode(opcode)) {
+                ++chain_epoch; // sotcport: see chain_epoch
+            }
+            if (GameSyncOpcode(opcode, dcb.data())) {
+                game_sync_pending = true; // sotcport: see game_sync_pending
+            }
             // sotcport: two-stage draw pipeline: everything but register writes, draws,
             // dispatches and no-ops waits for stage B to run dry.
             if (rasterizer && (!PipelinedOpcode(opcode, dcb.data()) ||
@@ -1260,6 +1305,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     }
     while (!acb.empty()) {
         ProcessCommands();
+        ++chain_epoch; // sotcport: see chain_epoch
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;
@@ -1306,6 +1352,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        if (GameSyncOpcode(opcode, reinterpret_cast<const u32*>(header))) {
+            game_sync_pending = true; // sotcport: see game_sync_pending
+        }
         // sotcport: two-stage draw pipeline: compute queue packets that touch the caches stage B
         // owns wait for it to run dry. Register writes and dispatches go through the ring like
         // the graphics queue's (a dispatch packet carries this queue's cs_state); waits drain

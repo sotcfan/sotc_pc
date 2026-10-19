@@ -335,6 +335,7 @@ private:
         u64 offset;
         u32 size;
         vk::AccessFlags2 src_access;
+        bool guest = false; ///< sotcport: a game shader's binding (Runtime::AccessBuffer)
     };
     std::vector<BoundBuffer> bound_buffers;
     std::vector<VideoCore::ImageId> bound_images;
@@ -375,6 +376,33 @@ private:
     };
     BindMemo bind_memo;
     std::vector<u32> bind_key;
+
+    /// sotcport: indirect draws chained onto the one before them. The game draws runs of
+    /// indirect draws that differ only in where their arguments are: the next 20 bytes of the
+    /// same buffer (half of its ~10,000 indirect draws a frame in the forest, in runs of ~5,
+    /// 2026-10-19). Every such draw used to go through the whole binding path to bind the same
+    /// state again; when nothing changed since the previous draw (no register, no user data, no
+    /// command recorded in between), only the draw command is recorded (TryChainIndirectDraw).
+    /// Stage B only. SOTC_NO_DRAW_CHAIN=1 turns it off.
+    struct IndirectChain {
+        u64 packet = ~u64{0}; ///< bind_packet of the chain's last draw; valid for the next one
+        const Pipeline* pipeline = nullptr;
+        u64 record_serial = 0; ///< Scheduler::RecordSerial right after its draw command
+        u64 tick = 0;          ///< the command buffer it is in (Scheduler::CurrentTick)
+        VAddr args_end = 0;    ///< where the arguments of a draw chained onto it must start
+        u32 stride = 0;
+        bool is_indexed = false;
+        /// Every stage's program address, user data and flattened user data, in order.
+        std::vector<u64> stage_bases;
+        std::vector<u32> user_data;
+    };
+    IndirectChain indirect_chain;
+    bool packet_regs_changed = true; ///< RunPacket: the packet changed a register's value
+    bool TryChainIndirectDraw(const GraphicsPipeline* pipeline, bool is_indexed,
+                              const IndirectDraw& indirect);
+    void StartIndirectChain(const GraphicsPipeline* pipeline, bool is_indexed,
+                            const IndirectDraw& indirect);
+
     u64 bind_packet = 0;         ///< counts stage B packets and drains (see BindMemo::packet)
     bool memo_recording = false; ///< BindResources is recording a BindMemo
     u32 memo_stage = 0;          ///< the stage BindBuffers is binding (for BindMemo::Dynamic)
@@ -396,6 +424,27 @@ private:
     std::unique_ptr<DrawPipe> draw_pipe;
     std::unique_ptr<StageState> pipe_state; ///< stage B's copy of the GPU state
     bool pipe_synced = false;               ///< pipe_state started from the live registers
+    /// sotcport: the registers as stage B has them after the last packet (stage A's copy,
+    /// updated by PostPacket): whether a register write changed a value (RegsChangedSincePost).
+    std::unique_ptr<AmdGpu::Regs> posted_regs;
+    u64 posted_packets = 0; ///< packets and tasks posted to stage B
+    std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> posted_cb_extent{};
+    AmdGpu::CbDbExtent posted_db_extent{};
+    bool RegsChangedSincePost() const;
+    /// sotcport: stage A's side of the indirect draw chain (see IndirectChain): an indirect draw
+    /// right after another one (no other packet posted, Liverpool::chain_epoch the same), with
+    /// the same parameters and no register value changed, uses the pipeline found for the one
+    /// before it as it is: the shaders, their user data and their flattened user data are the
+    /// same (GetGraphicsPipeline was ~half of stage A's time per draw).
+    struct StageAChain {
+        const GraphicsPipeline* pipeline = nullptr;
+        u64 epoch = 0;
+        u64 posted = 0;
+        u16 vertex_sgpr_offset = 0;
+        u32 instance_sgpr_offset = 0;
+        bool is_indexed = false;
+    };
+    StageAChain stage_a_chain;
     struct PendingWrite {
         VAddr begin, end;
         u64 position; ///< ring position after the packet that writes it

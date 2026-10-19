@@ -71,11 +71,30 @@ public:
 
     void SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing = true);
 
+    /// sotcport: `guest`: an access by one of the game's shaders to one of its buffers (a
+    /// storage or uniform binding). Hazards between two such accesses are left to the game's own
+    /// synchronization (see GuestWritesPending); hazards with anything else (copies, uploads and
+    /// downloads, fixed-function reads such as indirect arguments or indices) get a barrier as
+    /// before.
     void AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
-                      vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access);
+                      vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access,
+                      bool guest = false);
 
     bool IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
-                          bool check_read_access = false);
+                          bool check_read_access = false, bool guest = false);
+
+    /// sotcport: whether a game shader wrote a buffer since the last barrier. On the PS4 the GPU
+    /// starts a dispatch or draw without waiting for the ones before it: a game that needs their
+    /// results waits for them itself (ACQUIRE_MEM, WAIT_REG_MEM on an end-of-pipe label...).
+    /// Every hazard between the game's shaders used to get a global barrier here (~1,800 a frame
+    /// in the forest, between dispatches that write the same buffers one after the other, where
+    /// the game asks for ~100), which made the GPU run its small dispatches one at a time. Now
+    /// stage B puts one barrier where the game synchronizes (Rasterizer::RunPacket), if a game
+    /// shader wrote anything since the last one. SOTC_STRICT_BARRIERS=1 goes back to a barrier
+    /// at every hazard.
+    bool GuestWritesPending() const noexcept {
+        return guest_writes_pending;
+    }
 
     void FlushBarriers();
 
@@ -92,7 +111,10 @@ private:
         using AccessList = IntervalList<Interval>;
         AccessList read_ranges;
         AccessList write_ranges;
+        AccessList guest_read_ranges;  ///< sotcport: see AccessBuffer
+        AccessList guest_write_ranges; ///< sotcport: see AccessBuffer
     };
+    bool guest_writes_pending = false; ///< sotcport: see GuestWritesPending
     BufferBarriers* resource{};
     std::vector<BufferBarriers> resources;
     u32 num_resources = 0; ///< sotcport: entries of `resources` in use (see FlushBarriers)

@@ -121,6 +121,9 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// sotcport: changes whenever memory may have become CPU-modified (MemoryTracker::CpuMarks).
+    [[nodiscard]] u64 CpuMarks() const;
+
     /// sotcport (diagnostics): copies what the GPU's arena holds for [device_addr, +size) into
     /// `out`, changing no state (waits for the GPU). False when it is not all resident.
     bool PeekGpuMemory(VAddr device_addr, u64 size, u8* out);
@@ -240,6 +243,9 @@ private:
     /// ranges out until the data is in guest memory: "not modified" then always means the
     /// memory is current.
     mutable std::shared_mutex gpu_modified_mutex;
+    /// sotcport: bumped (under gpu_modified_mutex) whenever ranges leave gpu_modified_ranges:
+    /// while it stays the same, a range found there is still there (ObtainBuffer).
+    std::atomic<u64> gpu_modified_removals{0};
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

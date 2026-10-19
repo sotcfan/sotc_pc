@@ -56,6 +56,8 @@ void NoteFrameForSpikes();
 // TEMP timeline (SOTC_FRAME_TIMELINE=<n>): events stamped by any thread; every n-th presented
 // frame, the events since the previous one are logged.
 void Mark(char kind, uint64_t value = 0);
+// The same with a time of its own (Now()'s clock): for events seen after the fact.
+void MarkAt(char kind, uint64_t ns, uint64_t value = 0);
 // Device-local memory in use (VK_EXT_memory_budget) and the texture cache's garbage collector
 // thresholds, all in bytes; refreshed at every submit by TextureCache::GarbageCollectImages.
 void NoteVram(uint64_t used, uint64_t pressure, uint64_t critical);

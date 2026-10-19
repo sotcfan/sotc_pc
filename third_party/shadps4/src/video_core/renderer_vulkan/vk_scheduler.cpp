@@ -562,6 +562,23 @@ void Scheduler::GpuTimingEnd(vk::CommandBuffer cmdbuf) {
                           timing_unsubmitted.back().slot * 2 + 1);
 }
 
+void Scheduler::GpuTimingCalibrate() {
+    if (!instance.HasCalibratedTimestamps()) {
+        return;
+    }
+    const std::array<vk::CalibratedTimestampInfoEXT, 2> infos = {
+        vk::CalibratedTimestampInfoEXT{.timeDomain = vk::TimeDomainEXT::eDevice},
+        vk::CalibratedTimestampInfoEXT{.timeDomain = vk::TimeDomainEXT::eClockMonotonic},
+    };
+    std::array<u64, 2> stamps{};
+    u64 deviation = 0;
+    if (instance.GetDevice().getCalibratedTimestampsEXT(2, infos.data(), stamps.data(),
+                                                        &deviation) == vk::Result::eSuccess) {
+        timing_gpu_ref = stamps[0];
+        timing_cpu_ref = stamps[1];
+    }
+}
+
 void Scheduler::GpuTimingCollect() {
     if (!timing_pool) {
         return;
@@ -577,6 +594,17 @@ void Scheduler::GpuTimingCollect() {
             vk::Result::eSuccess) {
             continue;
         }
+        if (timing_cpu_ref) {
+            // On the frame timeline: 'g' the command buffer starts on the GPU, 'G' it ends.
+            const auto to_cpu = [&](u64 stamp) {
+                return timing_cpu_ref +
+                       static_cast<u64>(
+                           static_cast<double>(static_cast<s64>(stamp - timing_gpu_ref)) *
+                           period);
+            };
+            perf::MarkAt('g', to_cpu(stamps[0]));
+            perf::MarkAt('G', to_cpu(stamps[1]));
+        }
         const double busy = (stamps[1] - stamps[0]) * period;
         timing_busy_ns += busy;
         timing_max_ns = std::max(timing_max_ns, busy);
@@ -588,6 +616,7 @@ void Scheduler::GpuTimingCollect() {
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - timing_report >= std::chrono::seconds{5}) {
+        GpuTimingCalibrate();
         const double seconds =
             timing_report.time_since_epoch().count() ? std::chrono::duration<double>(now - timing_report).count() : 5.0;
         LOG_INFO(Render, "GPU timing: busy {:.1f} ms/s, idle between command buffers {:.1f} ms/s, "

@@ -74,6 +74,18 @@ struct Liverpool {
     // sotcport: set by the rasterizer when the two-stage draw pipeline is on: then its packets
     // take (and clear) reg_dirty, and PipeCheckpoint leaves it alone.
     bool pipe_owns_dirty = false;
+    // sotcport: changes with every packet that may change something an indirect draw depends on
+    // besides the registers (memory writes, constant engine, compute queues...): the rasterizer
+    // chains an indirect draw onto the one before it only while this stays the same
+    // (Rasterizer::DrawIndirect). Graphics queue register writes, index setup and indirect
+    // draws leave it alone.
+    u64 chain_epoch = 0;
+    // sotcport: the game synchronized its GPU work since the last packet handed to the draw
+    // pipeline (ACQUIRE_MEM, WAIT_REG_MEM, end-of-pipe/shader events, CP DMA): where stage B
+    // makes the game's shader writes visible (Vulkan::Runtime::GuestWritesPending).
+    bool game_sync_pending = false;
+    static bool GameSyncOpcode(PM4ItOpcode opcode, const u32* packet);
+    static bool ChainSafeOpcode(PM4ItOpcode opcode);
     // The graphics-queue packets the two-stage draw pipeline lets through without waiting for
     // stage B: register writes, draws, dispatches and packets that do nothing here.
     /// Writes an end-of-pipe fence's value and raises its interrupt (sotcport: also called by

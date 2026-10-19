@@ -728,17 +728,41 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
 }
 
 bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
-                               bool check_read_access) {
+                               bool check_read_access, bool guest) {
     MakeCurrent(handle);
-    bool has_access = resource->write_ranges.Overlaps(offset, offset + size);
+    const u64 end = offset + size;
+    // sotcport: a game shader's access does not wait for other game shaders' (see AccessBuffer).
+    bool has_access = resource->write_ranges.Overlaps(offset, end) ||
+                      (!guest && resource->guest_write_ranges.Overlaps(offset, end));
     if (check_read_access && !has_access) {
-        has_access |= resource->read_ranges.Overlaps(offset, offset + size);
+        has_access |= resource->read_ranges.Overlaps(offset, end) ||
+                      (!guest && resource->guest_read_ranges.Overlaps(offset, end));
     }
     return has_access;
 }
 
+static constexpr vk::AccessFlags2 READ_MASK =
+    vk::AccessFlagBits2::eIndexRead | vk::AccessFlagBits2::eVertexAttributeRead |
+    vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderRead |
+    vk::AccessFlagBits2::eColorAttachmentRead |
+    vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eTransferRead |
+    vk::AccessFlagBits2::eMemoryRead;
+
+static constexpr vk::AccessFlags2 WRITE_MASK =
+    vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eColorAttachmentWrite |
+    vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
+    vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
+
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
-                           vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
+                           vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access,
+                           bool guest) {
+    // sotcport: reads of the stream buffer are not tracked (Buffer::untracked_reads): every draw
+    // reads fresh ranges of it, so each one was a new interval to insert and merge (~4% of the
+    // draw recording thread, 2026-10-19).
+    if (handle->untracked_reads && !(src_access & WRITE_MASK)) {
+        memory_barrier.srcStageMask |= src_stage;
+        return;
+    }
     MakeCurrent(handle);
 
     const Interval range = {
@@ -746,25 +770,20 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         .end = offset + size,
     };
 
-    constexpr static vk::AccessFlags2 READ_MASK =
-        vk::AccessFlagBits2::eIndexRead | vk::AccessFlagBits2::eVertexAttributeRead |
-        vk::AccessFlagBits2::eUniformRead | vk::AccessFlagBits2::eShaderRead |
-        vk::AccessFlagBits2::eColorAttachmentRead |
-        vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eTransferRead |
-        vk::AccessFlagBits2::eMemoryRead;
-
-    constexpr static vk::AccessFlags2 WRITE_MASK =
-        vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eColorAttachmentWrite |
-        vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
-        vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
-
+    auto& writes = guest ? resource->guest_write_ranges : resource->write_ranges;
+    auto& reads = guest ? resource->guest_read_ranges : resource->read_ranges;
     if (src_access & WRITE_MASK) {
-        resource->write_ranges.Add(range);
+        // sotcport: the same output buffers are written dispatch after dispatch: skip the insert
+        // (and the merge it does) when the range is there already, as for reads.
+        if (!writes.Contains(range.start, range.end)) {
+            writes.Add(range);
+        }
+        guest_writes_pending |= guest;
     }
     // sotcport: draws read the same buffers draw after draw; skip the insert (and the merge it
     // does) when the range is there already (~8% of the draw recording thread).
-    if (src_access & READ_MASK && !resource->read_ranges.Contains(range.start, range.end)) {
-        resource->read_ranges.Add(range);
+    if (src_access & READ_MASK && !reads.Contains(range.start, range.end)) {
+        reads.Add(range);
     }
 
     memory_barrier.srcStageMask |= src_stage;
@@ -814,7 +833,10 @@ void Runtime::FlushBarriers() {
     for (u32 i = 0; i < num_resources; i++) {
         resources[i].read_ranges.Clear();
         resources[i].write_ranges.Clear();
+        resources[i].guest_read_ranges.Clear();
+        resources[i].guest_write_ranges.Clear();
     }
+    guest_writes_pending = false;
     // Measured (2026-10-11, 3 alternating runs each): 3.66 -> 3.54 us per draw+dispatch.
     num_resources = 0;
     resource = nullptr;

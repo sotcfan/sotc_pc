@@ -59,6 +59,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
+    stream_buffer.untracked_reads = true; // sotcport: see Buffer::untracked_reads
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
@@ -314,6 +315,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         };
         gpu_modified_ranges.ForEachInRange(address, size, add_download);
         gpu_modified_ranges.Subtract(address, size);
+        gpu_modified_removals.fetch_add(1, std::memory_order_release);
     });
     if (total_size_bytes == 0) {
         perf::Add(perf::EmptyDownload, 0); // sotcport TEMP
@@ -367,6 +369,7 @@ u64 BufferCache::CollectDownloads(std::span<const std::pair<VAddr, u64>> windows
                 total_size_bytes += Common::AlignUp(range_end - range_start, 64ULL);
             });
             gpu_modified_ranges.Subtract(address, size);
+            gpu_modified_removals.fetch_add(1, std::memory_order_release);
         });
         out.push_back({arena, start, size, first_copy, copies.size() - first_copy});
     }
@@ -470,9 +473,24 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     if (is_written && !shadowed) {
         // sotcport: the same storage buffers are bound for writing draw after draw; the interval
         // set insert (allocation, merging) is skipped when the range is already there.
-        std::scoped_lock lock{gpu_modified_mutex}; // sotcport: two-stage draw pipeline
-        if (!gpu_modified_ranges.Contains(device_addr, size)) {
-            gpu_modified_ranges.Add(device_addr, size);
+        // sotcport: and the lock and the search are skipped for a range this thread found or
+        // added there since the last removal (gpu_modified_removals): ~5% of the draw recording
+        // thread, the game's compute dispatches binding the same output buffers one after the
+        // other (2026-10-19).
+        struct KnownRange {
+            VAddr address;
+            u64 size;
+            u64 removals;
+        };
+        static thread_local std::array<KnownRange, 64> known{};
+        auto& slot = known[((device_addr >> 6) ^ size) % known.size()];
+        if (slot.address != device_addr || slot.size != size ||
+            slot.removals != gpu_modified_removals.load(std::memory_order_acquire)) {
+            std::scoped_lock lock{gpu_modified_mutex}; // sotcport: two-stage draw pipeline
+            if (!gpu_modified_ranges.Contains(device_addr, size)) {
+                gpu_modified_ranges.Add(device_addr, size);
+            }
+            slot = {device_addr, size, gpu_modified_removals.load(std::memory_order_relaxed)};
         }
     }
     SynchronizeMemory(arena, device_addr, size, is_written && !shadowed, is_texel_buffer);
@@ -497,11 +515,16 @@ void BufferCache::ForgetGpuWrites(VAddr addr, u64 size) {
         return;
     }
     gpu_modified_ranges.Subtract(addr, size);
+    gpu_modified_removals.fetch_add(1, std::memory_order_release);
     UnmarkDownloaded(addr, size);
 }
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionCpuModified(addr, size);
+}
+
+u64 BufferCache::CpuMarks() const {
+    return memory_tracker->CpuMarks();
 }
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {

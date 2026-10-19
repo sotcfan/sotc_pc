@@ -2,8 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <immintrin.h>
+#include <thread>
 #include <utility>
 #include "common/adaptive_mutex.h"
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -260,9 +263,60 @@ struct PageManager::Impl {
     void UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
                                      const RegionBits& write_mask, const RegionBits& read_mask,
                                      PageOp write_op, PageOp read_op) {
-        const u64 base_page = base_addr >> PM_PAGE_BITS;
         const u64 page_start = bounds.start_word * PAGES_PER_WORD + bounds.start_page;
         const u64 page_end = bounds.end_word * PAGES_PER_WORD + bounds.end_page + 1;
+        // sotcport: only the stretches of pages whose watchers change (a mask bit set), each
+        // with the pages around it up to MaxGap unchanged pages (so their protection can still
+        // be applied in one call, as before). The bounds span from the first to the last changed
+        // page of a 16 MiB region: after a DMA sync (BufferCache::SynchronizeDmaBuffers) the
+        // pages the game wrote are spread over it, and every page in between was locked,
+        // looked at and unlocked (~3% of the draw recording thread, 2026-10-19).
+        constexpr u64 MaxGap = 16;
+        const auto changes = [&](u64 word) {
+            u64 bits = 0;
+            if (write_op != PageOp::None) {
+                bits |= write_mask[word];
+            }
+            if (read_op != PageOp::None) {
+                bits |= read_mask[word];
+            }
+            return bits;
+        };
+        // The next page from `page` on whose watchers change, or page_end.
+        const auto next_change = [&](u64 page) {
+            while (page < page_end) {
+                const u64 bits = changes(page / PAGES_PER_WORD) >> (page % PAGES_PER_WORD);
+                if (bits != 0) {
+                    return std::min(page + std::countr_zero(bits), page_end);
+                }
+                page = Common::AlignUp(page + 1, PAGES_PER_WORD);
+            }
+            return page_end;
+        };
+        // The end of the stretch starting at `page` (a changed page): past its last changed page
+        // that is followed by more than MaxGap unchanged ones.
+        const auto stretch_end = [&](u64 page) {
+            u64 last = page;
+            for (u64 next = next_change(page + 1); next < page_end && next - last <= MaxGap;
+                 next = next_change(next + 1)) {
+                last = next;
+            }
+            return last + 1;
+        };
+        for (u64 first = next_change(page_start); first < page_end;) {
+            const u64 last = stretch_end(first);
+            UpdatePageWatchersForStretch(base_addr, first, last, write_mask, read_mask, write_op,
+                                         read_op);
+            first = next_change(last);
+        }
+    }
+
+    // The original UpdatePageWatchersForRegion, for the pages [page_start, page_end) of the
+    // region at base_addr: their locks are held until their protection is applied.
+    void UpdatePageWatchersForStretch(VAddr base_addr, u64 page_start, u64 page_end,
+                                      const RegionBits& write_mask, const RegionBits& read_mask,
+                                      PageOp write_op, PageOp read_op) {
+        const u64 base_page = base_addr >> PM_PAGE_BITS;
 
         Core::MemoryPermission perms{};
         u64 range_begin = base_page + page_start;
@@ -334,12 +388,33 @@ struct PageManager::Impl {
         static constexpr bool NULL_CHECK = false;
     };
     Common::MultiLevelPageTable<PageTraits> cached_pages;
+    // sotcport: one byte per page, taken and released inline. The page locks are taken for
+    // every page of every range whose watchers change (UpdatePageWatchersForRegion: the draw
+    // recording thread re-protects the pages it uploads, often hundreds at a time), and a
+    // pthread adaptive mutex there meant two calls into libc per page and 40 bytes of lock per
+    // 4 KiB page (~4% of the draw recording thread, 2026-10-19). Held only for the state update
+    // and the mprotect that follows it, so waiting by spinning is enough; a holder that lost its
+    // CPU is waited for with yields.
+    struct PageLock {
+        std::atomic<u8> held; // zero-initialized with the table's pages
+
+        void lock() noexcept {
+            while (held.exchange(1, std::memory_order_acquire) != 0) {
+                for (u32 spins = 0; held.load(std::memory_order_relaxed) != 0; ++spins) {
+                    if (spins < 256) {
+                        _mm_pause();
+                    } else {
+                        std::this_thread::yield();
+                    }
+                }
+            }
+        }
+        void unlock() noexcept {
+            held.store(0, std::memory_order_release);
+        }
+    };
     struct MutexTraits {
-#ifdef PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP
-        using Entry = Common::AdaptiveMutex;
-#else
-        using Entry = std::mutex;
-#endif
+        using Entry = PageLock;
         static constexpr size_t ADDRESS_SPACE_BITS = ADDRESS_BITS;
         static constexpr size_t L1_BITS = 16;
         static constexpr size_t PAGE_BITS = PM_PAGE_BITS;

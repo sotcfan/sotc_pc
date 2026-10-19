@@ -515,6 +515,7 @@ public:
 
     [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
         CheckOwner(); // TEMP
+        ++record_serial; // sotcport: the caller records directly
         if (recording_threaded && !direct_mode) {
             SyncRecording();
             direct_mode = true;
@@ -534,6 +535,7 @@ public:
     template <typename Func>
     void Record(Func&& func) {
         CheckOwner(); // TEMP (two-stage draw pipeline)
+        ++record_serial;
         if (!recording_threaded || direct_mode) {
             func(recording_threaded ? recording_cmdbuf : sessions.back().primary);
             return;
@@ -544,6 +546,12 @@ public:
             const bool pushed = record_chunk->Push(std::forward<Func>(func));
             ASSERT(pushed);
         }
+    }
+
+    /// sotcport: changes with every command recorded (Record, CommandBuffer): whether anything
+    /// was recorded since a given point (Rasterizer::TryChainIndirectDraw).
+    [[nodiscard]] u64 RecordSerial() const noexcept {
+        return record_serial;
     }
 
     /// sotcport: whether Record() defers commands to the recording thread right now.
@@ -693,6 +701,11 @@ private:
     std::deque<TimingPending> timing_pending;
     std::vector<TimingPending> timing_unsubmitted;
     u64 timing_last_end = 0;
+    /// sotcport: a GPU timestamp and CLOCK_MONOTONIC (perf::Now's clock) at the same moment, to
+    /// put the GPU's command buffer spans on the frame timeline (SOTC_FRAME_TIMELINE).
+    u64 timing_gpu_ref = 0;
+    u64 timing_cpu_ref = 0;
+    void GpuTimingCalibrate();
     double timing_busy_ns = 0, timing_gap_ns = 0, timing_max_ns = 0;
     u64 timing_count = 0;
     std::chrono::steady_clock::time_point timing_report{};
@@ -714,6 +727,7 @@ private:
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
     bool is_rendering = false;
+    u64 record_serial = 0; ///< sotcport: see RecordSerial
     tracy::VkCtxScope* profiler_scope{};
     // sotcport: threaded recording (see Record()).
     bool recording_threaded = false;

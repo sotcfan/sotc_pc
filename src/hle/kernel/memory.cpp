@@ -142,6 +142,10 @@ struct RunCache {
     // frame, and with 8 they kept evicting each other (~6% of the draw recording thread).
     std::array<Run, 64> runs{};
     u32 next = 0;
+    // sotcport: the run of the last hit, tried first: a draw looks up the same few runs over and
+    // over, and scanning up to 64 entries each time was ~4% of the draw recording thread
+    // (2026-10-19).
+    u32 last = 0;
 };
 thread_local RunCache t_runs;
 
@@ -449,8 +453,14 @@ public:
         RunCache& cache = t_runs;
         const u64 generation = generation_.load(std::memory_order_acquire);
         if (cache.generation == generation) {
-            for (const auto& run : cache.runs) {
+            if (const auto& run = cache.runs[cache.last];
+                address - run.start < run.end - run.start) {
+                return std::min(run.end - address, size);
+            }
+            for (u32 i = 0; i < cache.runs.size(); ++i) {
+                const auto& run = cache.runs[i];
                 if (address - run.start < run.end - run.start) {
+                    cache.last = i;
                     return std::min(run.end - address, size);
                 }
             }
@@ -468,7 +478,8 @@ public:
             return 0;
         }
         if (generation_.load(std::memory_order_relaxed) == generation) {
-            cache.runs[cache.next++ % cache.runs.size()] = {it->first, it->second};
+            cache.last = cache.next++ % cache.runs.size();
+            cache.runs[cache.last] = {it->first, it->second};
         }
         return std::min(it->second, address + size) - address;
     }
