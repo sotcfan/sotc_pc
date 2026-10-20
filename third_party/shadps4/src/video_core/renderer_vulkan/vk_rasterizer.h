@@ -9,6 +9,7 @@
 #include "common/unique_function.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/vk_fsr.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -430,6 +431,7 @@ private:
 
     // sotcport (two-stage draw pipeline).
     std::unique_ptr<DrawPipe> draw_pipe;
+    std::unique_ptr<FsrPass> fsr; // sotcport: SOTC_UPSCALER=fsr (vk_fsr.h)
     std::unique_ptr<StageState> pipe_state; ///< stage B's copy of the GPU state
     bool pipe_synced = false;               ///< pipe_state started from the live registers
     /// sotcport: the registers as stage B has them after the last packet (stage A's copy,

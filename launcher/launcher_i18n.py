@@ -87,6 +87,18 @@ PT_BR = {
     "Only 30 FPS without the PS4 Pro mode": "Só 30 FPS sem o modo PS4 Pro",
     "Game resolution": "Resolução do jogo",
     "Native: the monitor's ({})": "Nativa: a do monitor ({})",
+    "Upscaling": "Upscaling",
+    "Off: native resolution": "Desligado: resolução nativa",
+    "FSR 3.1 Quality (1.5×)": "FSR 3.1 Qualidade (1,5×)",
+    "FSR 3.1 Balanced (1.7×)": "FSR 3.1 Equilibrado (1,7×)",
+    "FSR 3.1 Performance (2×)": "FSR 3.1 Desempenho (2×)",
+    "FSR 3.1 Ultra Performance (3×)": "FSR 3.1 Ultra desempenho (3×)",
+    "FSR 3.1 Native (anti-aliasing only)": "FSR 3.1 Nativo (só anti-serrilhado)",
+    "FSR sharpening": "Nitidez do FSR",
+    "FSR draws the scene smaller and rebuilds it at the game's resolution over several frames: "
+    "more frames per second. It replaces the game's anti-aliasing.":
+        "O FSR desenha a cena menor e a reconstrói na resolução do jogo ao longo de vários "
+        "quadros: mais quadros por segundo. Ele substitui o anti-serrilhado do jogo.",
     "The game's menu: the PS4 Pro's modes, enlarged to 1080p or 4K":
         "A do menu do jogo: os modos do PS4 Pro, ampliados para 1080p ou 4K",
     "The game draws and outputs at this size, with no upscaling. Needs the PS4 Pro mode.":

@@ -131,3 +131,16 @@ target_compile_options(shadps4_video PRIVATE -w -fno-strict-aliasing -fno-omit-f
 target_link_libraries(shadps4_video PUBLIC
     sirit Zydis miniz fmt::fmt absl::flat_hash_map absl::flat_hash_set
     Boost::headers SDL3::SDL3 xxhash ${CMAKE_DL_LIBS})
+
+# sotcport: FSR 3.1 temporal upscaling (FireBurn/FSR-Vulkan, MIT; only the upscaler, see
+# externals/fsr-vulkan/ORIGIN.txt), used by renderer_vulkan/vk_fsr.cpp. Its CMake looks Vulkan up
+# with FindVulkan: the headers are the project's own (the loader library is the system's).
+set(FFX_VK_PORTABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(FFX_VK_PORTABLE_BUILD_PROBE OFF CACHE BOOL "" FORCE)
+set(FFX_VK_PORTABLE_BUILD_FSR3_3_1_5_SCAFFOLD OFF CACHE BOOL "" FORCE)
+set(FFX_VK_PORTABLE_BUILD_FSR4_V07_VULKAN OFF CACHE BOOL "" FORCE)
+set(FFX_VK_PORTABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(Vulkan_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/externals/vulkan-headers/include
+    CACHE PATH "Vulkan headers (the project's own)" FORCE)
+add_subdirectory(externals/fsr-vulkan EXCLUDE_FROM_ALL)
+target_link_libraries(shadps4_video PUBLIC ffx-vulkan::portable)

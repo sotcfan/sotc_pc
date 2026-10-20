@@ -68,6 +68,13 @@ GAME_LANGUAGES = [("Automatic: the system's", "auto"), ("The one chosen in the g
                   ("Nederlands", "nl"), ("Dansk", "da"), ("Suomi", "fi"), ("Norsk", "no"),
                   ("Svenska", "sv"), ("Polski", "pl"), ("Русский", "ru"), ("Türkçe", "tr"),
                   ("العربية", "ar")]
+# FSR 3.1 (src/gpu/upscaler.h): off by default (the game draws at the resolution, no upscaling);
+# its modes draw the scene smaller (1.5, 1.7, 2 or 3 times) and FSR enlarges it; "native" keeps
+# the size and uses FSR as the anti-aliasing.
+UPSCALERS = [("Off: native resolution", ""), ("FSR 3.1 Quality (1.5×)", "quality"),
+             ("FSR 3.1 Balanced (1.7×)", "balanced"), ("FSR 3.1 Performance (2×)", "performance"),
+             ("FSR 3.1 Ultra Performance (3×)", "ultra"),
+             ("FSR 3.1 Native (anti-aliasing only)", "native")]
 FPS_LIMITS = [("30", "30"), ("60", "60"), ("90", "90"), ("120", "120"), ("144", "144"),
               ("165", "165"), ("Uncapped", "uncapped"), ("Custom", "custom")]
 WINDOW_SIZES = [("1280×720", "1280x720"), ("1600×900", "1600x900"), ("1920×1080", "1920x1080"),
@@ -117,6 +124,8 @@ DEFAULTS = {
     "fps_custom": 75,
     "resolution": "native",
     "game_language": "auto",
+    "upscaler": "",
+    "fsr_sharpness": 50,
     # Graphics (the engine's ConVars; the values are the game's own defaults on a PS4 Pro)
     "sun_shadows": True,
     "shadow_detail": "2",
@@ -219,6 +228,10 @@ def game_environment(s, native="1920x1080"):
         resolution = native if s["resolution"] == "native" else s["resolution"]
         if resolution:
             env["SOTC_RESOLUTION"] = resolution
+            if s["upscaler"]:
+                env["SOTC_UPSCALER"] = "fsr"
+                env["SOTC_FSR_MODE"] = s["upscaler"]
+                env["SOTC_FSR_SHARPNESS"] = f"{s['fsr_sharpness'] / 100:.2f}"
         else:
             # A 4K TV, as a PS4 Pro's: the game's menu offers its 4K mode only on one.
             env["SOTC_VIDEO_OUT"] = "3840x2160"
@@ -470,6 +483,18 @@ class LauncherWindow(QMainWindow):
         form.addRow(tr("Game resolution"), self.resolution)
         form.addRow("", note(tr("The game draws and outputs at this size, with no upscaling. "
                                 "Needs the PS4 Pro mode.")))
+
+        self.upscaler = combo(UPSCALERS, self.settings["upscaler"])
+        self.upscaler.currentIndexChanged.connect(self.update_state)
+        form.addRow(tr("Upscaling"), self.upscaler)
+        self.fsr_sharpness = QSpinBox()
+        self.fsr_sharpness.setRange(0, 100)
+        self.fsr_sharpness.setSuffix(" %")
+        self.fsr_sharpness.setValue(int(self.settings["fsr_sharpness"]))
+        form.addRow(tr("FSR sharpening"), self.fsr_sharpness)
+        form.addRow("", note(tr("FSR draws the scene smaller and rebuilds it at the game's "
+                                "resolution over several frames: more frames per second. It "
+                                "replaces the game's anti-aliasing.")))
         return page
 
     def build_graphics_tab(self):
@@ -657,6 +682,8 @@ class LauncherWindow(QMainWindow):
         s["fps_limit"] = self.fps_limit.currentData()
         s["fps_custom"] = self.fps_custom.value()
         s["resolution"] = self.resolution.currentData()
+        s["upscaler"] = self.upscaler.currentData()
+        s["fsr_sharpness"] = self.fsr_sharpness.value()
         s["sun_shadows"] = self.sun_shadows.isChecked()
         s["shadow_detail"] = self.shadow_detail.currentData()
         s["ao_mode"] = self.ao_mode.currentData()
@@ -687,6 +714,10 @@ class LauncherWindow(QMainWindow):
         running = self.process is not None
         self.fps_limit.setEnabled(self.pro_mode.isChecked())
         self.resolution.setEnabled(self.pro_mode.isChecked())
+        # FSR needs a resolution sotcport sets (not the game's own menu).
+        fsr_possible = self.pro_mode.isChecked() and bool(self.resolution.currentData())
+        self.upscaler.setEnabled(fsr_possible)
+        self.fsr_sharpness.setEnabled(fsr_possible and bool(self.upscaler.currentData()))
         self.resolution.setItemText(0, tr("Native: the monitor's ({})").format(
             self.native_size().replace("x", "×")))
         self.fps_custom.setVisible(self.fps_limit.currentData() == "custom")

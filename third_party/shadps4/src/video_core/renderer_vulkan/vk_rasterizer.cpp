@@ -235,6 +235,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
+    fsr = std::make_unique<FsrPass>(instance, scheduler, runtime, texture_cache);
 
     // sotcport: two-stage draw pipeline, SOTC_DRAW_PIPE=1 (off by default while it is new).
     // Host debug markers wrap each draw on the GPU command thread, so they keep it off.
@@ -2728,6 +2729,24 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         image_descriptor_array_sizes.push_back(num_bindings);
     }
 
+    // sotcport: FSR (vk_fsr.h). The game's final draw samples the post-processed scene (render
+    // size, RGBA16F) together with an output-size image (the interface): FSR's result is bound
+    // in place of the scene.
+    bool fsr_final_draw = false;
+    if (fsr->Enabled()) {
+        bool samples_scene = false, samples_output = false;
+        for (u32 i = 0; i < num_images; ++i) {
+            const auto& [image_id, desc] = image_bindings[i];
+            if (!image_id || desc.type == VideoCore::TextureCache::BindingType::Storage) {
+                continue;
+            }
+            const auto& bound = texture_cache.GetImage(image_id);
+            samples_scene |= fsr->IsScene(bound);
+            samples_output |= fsr->IsOutputSized(bound);
+        }
+        fsr_final_draw = samples_scene && samples_output;
+    }
+
     // Second pass to re-bind images that were updated after binding
     for (u32 i = 0; i < num_images; ++i) {
         auto& [image_id, desc] = image_bindings[i];
@@ -2780,6 +2799,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image.usage.storage |= is_storage;
             image.usage.texture |= !is_storage;
 
+            vk::ImageView fsr_view;
+            vk::ImageLayout fsr_layout;
+            if (fsr_final_draw && !is_storage && fsr->IsScene(image) &&
+                fsr->ReplaceScene(image_id, fsr_view, fsr_layout)) {
+                image_infos.emplace_back(VK_NULL_HANDLE, fsr_view, fsr_layout);
+                continue;
+            }
             image_infos.emplace_back(VK_NULL_HANDLE, *image_view.image_view,
                                      image.backing->state.layout);
         }
@@ -2871,6 +2897,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         }
         texture_cache.UpdateImage(image_id);
         runtime.SetBackingSamples(image, key.color_samples[cb]);
+        fsr->NoteTarget(image_id, *image); // sotcport: the scene's motion vectors (FSR)
         const auto& image_view = texture_cache.FindRenderTarget(image_id, desc);
         const auto slice = image_view.info.range.base.layer;
         const auto mip = image_view.info.range.base.level;
@@ -2923,6 +2950,7 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
         auto& image = texture_cache.GetImage(image_id);
+        fsr->NoteTarget(image_id, image); // sotcport: the scene's depth (FSR)
 
         const auto slice = image_view.info.range.base.layer;
         const bool is_depth_clear =

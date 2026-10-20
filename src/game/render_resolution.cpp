@@ -76,6 +76,7 @@
 
 #include "common/log.h"
 #include "common/types.h"
+#include "gpu/upscaler.h"
 #include "loader/hook.h"
 
 namespace game {
@@ -270,9 +271,12 @@ void InstallRenderResolution(std::vector<std::string>& game_args) {
         return;
     }
     // SOTC_RENDER_RESOLUTION: the 3D scene at another size than the output, for an upscaler
-    // (FSR) to enlarge; by default the same (native).
+    // (FSR) to enlarge; by default the same (native). SOTC_FSR_MODE gives it as FSR's ratios.
     u32 scene_width = width, scene_height = height;
-    if (const char* scene = std::getenv("SOTC_RENDER_RESOLUTION"); scene && *scene) {
+    if (gpu::upscaler::Requested() &&
+        gpu::upscaler::RenderSizeForMode(width, height, scene_width, scene_height)) {
+        // the size FSR's mode asks for
+    } else if (const char* scene = std::getenv("SOTC_RENDER_RESOLUTION"); scene && *scene) {
         u32 w = 0, h = 0;
         if (std::sscanf(scene, "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 7680 &&
             h <= 4320) {
@@ -285,6 +289,7 @@ void InstallRenderResolution(std::vector<std::string>& game_args) {
     if (!PatchSizes(width, height, scene_width, scene_height)) {
         return;
     }
+    gpu::upscaler::Configure(scene_width, scene_height, width, height);
     // Ask for the 4K mode unless the game's command line already chooses one.
     const bool chosen = std::ranges::any_of(game_args, [](const std::string& arg) {
         return arg.starts_with("+r_Wants4K=");

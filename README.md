@@ -66,7 +66,8 @@ the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Deb
 - **Display:** fullscreen (borderless, Alt+Enter toggles it), monitor, window size, VSync (present
   mode), PS4 Pro mode, the frame rate limit and the game's resolution: by default the monitor's
   own (the game draws and outputs at it, no upscaling; on a PS4 Pro it drew at 1600x900 or
-  2560x1440 and enlarged that to 1080p or 4K).
+  2560x1440 and enlarged that to 1080p or 4K). Upscaling: off by default, or FSR 3.1 (Quality, Balanced,
+  Performance, Ultra Performance, or Native as anti-aliasing only) with its sharpening.
 - **Graphics:** presets (Console, High, Maximum) and the game engine's own settings (sun shadows
   and their detail, ambient occlusion, anti-aliasing, motion blur, depth of field, bloom, film
   grain, vignette, distant detail of vegetation and props, particles, anisotropic filtering),
