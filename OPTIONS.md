@@ -30,7 +30,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `--trace <file>` | Records, in order, the first call to each Sony function the game imports. |
 | `--dump-after <s>` | After `s` seconds every game thread prints where it is (`kill -USR1 <pid>` does the same at any time). |
 | `--list-displays` | Lists the monitors, one per line, tab separated: number (what `SOTC_DISPLAY` takes), name, desktop size, refresh rate, 1 for the primary one. Then exits. |
-| `-- +<ConVar>=<value> ...` | Everything after `--` is the game's own command line. The engine reads its console variables (ConVars) from it: `+r_motionBlurEnable=0`, `+r_dofEnable=0`, `+linearSamplerAnisoLevel=16`... `+help` writes every command and ConVar with its current value to the log. The launcher sets its graphics options this way. |
+| `-- +<ConVar>=<value> ...` | Everything after `--` is the game's own command line. The engine reads its console variables (ConVars) from it: `+r_motionBlurEnable=0`, `+r_dofEnable=0`, `+linearSamplerAnisoLevel=16`... `+help` writes every command and ConVar with its current value to the log. The launcher sets its graphics options this way. `+r_Wants4K=WantsHigh` / `WantsPerf` picks the PS4 Pro video mode (see `SOTC_VIDEO_OUT`). |
 
 ## Building
 
@@ -47,6 +47,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_FULLSCREEN=1` | Fills the monitor (borderless, at the desktop's own resolution: no mode switch). Alt+Enter toggles it while playing. |
 | `SOTC_DISPLAY=<n or name>` | The monitor the window (or fullscreen) goes to: its number in `--list-displays` (1 = the first) or its name. |
 | `SOTC_WINDOW_SIZE=<w>x<h>` | The window's size (default 1280x720). |
+| `SOTC_VIDEO_OUT=<w>x<h>` | The TV the game is told it is connected to (default 1280x720). With `SOTC_NEO_MODE=1` and `3840x2160` the game offers its PS4 Pro 4K mode (Options, or `+r_Wants4K=WantsHigh`): the 3D scene at 2560x1440 instead of 1600x900, output at 3840x2160 (fitted to the window). The launcher sets it in PS4 Pro mode. |
 | `SOTC_PRESENT_MODE=<mode>` | How frames reach the screen: `Mailbox` (default: no tearing, no waiting), `Fifo` (VSync: waits for the monitor's refresh), `FifoRelaxed` (VSync that tears when a frame is late), `Immediate` (no waiting, tears). |
 
 ## Frame rate
@@ -113,6 +114,7 @@ mode, played through the whole game on 2026-10-13). `SOTC_FPS_LIMIT` and `SOTC_U
 | `SOTC_MOUSE_CAMERA_TEST="<from>:<to>:<yaw>:<pitch>"` | Turns the free camera by itself between those seconds of the run, `yaw`/`pitch` radians per camera update, as the mouse would (right and down positive), and logs the angles: for testing the native mouse camera with a key script (`src/input/mouse_camera.cpp`). |
 | `SOTC_MOUSE_SCRIPT="80:move:400:500,82:click:400:545"` | Moves the menu cursor, clicks, presses (`down`) and releases (`up`) the left button, clicks the right button (`right`) or turns the wheel (`wheelup`, `wheeldown`) at those seconds (the `SOTC_KEY_SCRIPT` clock), in the game's UI coordinates (1920 x 1080): for testing the mouse in menus with a script (`src/input/menu_mouse.cpp`). |
 | F7 (key) | Diagnostic sequence: for ~4 s each, turns off one GPU layer optimization after another (shadow copies, SRT patches, bind memo, target cache, texture lookup cache, all of them, then LOD statistics on) and takes 12 screenshots per step, with `DIAG PHASE` lines in the log. For finding which one causes a defect that only shows in one place of the game; keep the camera still meanwhile. |
+| `SOTC_LOG_RT_SIZES=1` | Logs each render target size and format once: the resolution the game renders at. |
 | `SOTC_VERIFY_IMAGES=1` | Every 64th texture bound, checks that its memory still holds what its last upload read; logs the stale ones (memory changed without the texture cache noticing): which pages changed, the game's mappings there and its recent map/unmap events. Slows the game down. |
 | `SOTC_PERF=1` | Every 5 s, GPU layer counters in the log: time per kind of work, draws and dispatches per second, readbacks, write faults, draw pipeline stalls, frame pacing, VRAM in use. |
 | `SOTC_SPIKES=<ms>` | Logs every frame slower than `<ms>` with what its threads waited for (with `SOTC_PERF=1`). |

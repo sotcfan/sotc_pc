@@ -78,6 +78,14 @@ PT_BR = {
     "Uncapped": "Sem limite",
     "Custom": "Personalizado",
     "Only 30 FPS without the PS4 Pro mode": "Só 30 FPS sem o modo PS4 Pro",
+    "Game resolution": "Resolução do jogo",
+    "The game's menu (PS4 Pro mode option)": "A do menu do jogo (opção Modo PS4 Pro)",
+    "1600×900 (PS4 Pro 1080p 60FPS mode)": "1600×900 (modo 1080p 60FPS do PS4 Pro)",
+    "2560×1440 (PS4 Pro 4K 30FPS mode)": "2560×1440 (modo 4K 30FPS do PS4 Pro)",
+    "The resolution the game draws its 3D scene at; the PS4 Pro's 4K mode draws at 1440p and "
+    "enlarges to 4K, then the image is fitted to the window. Needs the PS4 Pro mode.":
+        "A resolução em que o jogo desenha a cena 3D; o modo 4K do PS4 Pro desenha em 1440p e "
+        "amplia para 4K, depois a imagem é ajustada à janela. Precisa do modo PS4 Pro.",
     # Graphics tab
     "Settings of the game's own engine, given to it at start.":
         "Configurações do próprio motor do jogo, passadas a ele ao iniciar.",

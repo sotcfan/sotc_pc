@@ -47,6 +47,13 @@ PRESENT_MODES = [("Mailbox: no tearing, no waiting (recommended)", "Mailbox"),
                  ("FIFO: waits for the monitor's refresh", "Fifo"),
                  ("FIFO Relaxed: tears when a frame is late", "FifoRelaxed"),
                  ("Immediate: no waiting, tears", "Immediate")]
+# The PS4 Pro's two video modes (the engine's r_Wants4K, an EWantsDisplayMode), measured with
+# SOTC_LOG_RT_SIZES on 2026-10-20: "1080p 60FPS" renders the scene at 1600x900 and outputs 1080p;
+# "4K 30FPS" renders at 2560x1440 and outputs 3840x2160 (paced by sotcport, it runs at any rate).
+# "" leaves it to the game's own options menu (saved in its profile).
+PRO_RESOLUTIONS = [("The game's menu (PS4 Pro mode option)", ""),
+                   ("1600×900 (PS4 Pro 1080p 60FPS mode)", "WantsPerf"),
+                   ("2560×1440 (PS4 Pro 4K 30FPS mode)", "WantsHigh")]
 FPS_LIMITS = [("30", "30"), ("60", "60"), ("90", "90"), ("120", "120"), ("144", "144"),
               ("165", "165"), ("Uncapped", "uncapped"), ("Custom", "custom")]
 WINDOW_SIZES = [("1280×720", "1280x720"), ("1600×900", "1600x900"), ("1920×1080", "1920x1080"),
@@ -73,6 +80,7 @@ DEFAULTS = {
     "pro_mode": True,
     "fps_limit": "60",
     "fps_custom": 75,
+    "pro_resolution": "",
     # Graphics (the engine's ConVars; the values are the game's own defaults on a PS4 Pro)
     "sun_shadows": True,
     "shadow_detail": "2",
@@ -146,6 +154,8 @@ def game_environment(s):
     env["SOTC_PRESENT_MODE"] = s["present_mode"]
     if s["pro_mode"]:
         env["SOTC_NEO_MODE"] = "1"
+        # A 4K TV, as a PS4 Pro's: the game offers its 4K mode only on one (OPTIONS.md).
+        env["SOTC_VIDEO_OUT"] = "3840x2160"
         if s["fps_limit"] == "uncapped":
             env["SOTC_UNCAPPED"] = "1"
         elif s["fps_limit"] == "custom":
@@ -177,6 +187,8 @@ def game_convars(s):
     the game's defaults (the engine reads "+name=value" from its command line). The names and
     defaults come from the engine's own list (`+help`, 2026-10-20)."""
     args = []
+    if s["pro_mode"] and s["pro_resolution"]:
+        args.append(f"+r_Wants4K={s['pro_resolution']}")
     if not s["sun_shadows"]:
         args.append("+r_enableCascadeShadows=0")
     if s["shadow_detail"] != "2":
@@ -357,6 +369,12 @@ class LauncherWindow(QMainWindow):
         form.addRow(tr("Frame rate limit"), row)
         self.fps_note = note(tr("Only 30 FPS without the PS4 Pro mode"))
         form.addRow("", self.fps_note)
+
+        self.pro_resolution = combo(PRO_RESOLUTIONS, self.settings["pro_resolution"])
+        form.addRow(tr("Game resolution"), self.pro_resolution)
+        form.addRow("", note(tr("The resolution the game draws its 3D scene at; the PS4 Pro's 4K "
+                                "mode draws at 1440p and enlarges to 4K, then the image is fitted "
+                                "to the window. Needs the PS4 Pro mode.")))
         return page
 
     def build_graphics_tab(self):
@@ -516,6 +534,7 @@ class LauncherWindow(QMainWindow):
         s["pro_mode"] = self.pro_mode.isChecked()
         s["fps_limit"] = self.fps_limit.currentData()
         s["fps_custom"] = self.fps_custom.value()
+        s["pro_resolution"] = self.pro_resolution.currentData()
         s["sun_shadows"] = self.sun_shadows.isChecked()
         s["shadow_detail"] = self.shadow_detail.currentData()
         s["ao_mode"] = self.ao_mode.currentData()
@@ -543,6 +562,7 @@ class LauncherWindow(QMainWindow):
         executable = find_executable(s)
         running = self.process is not None
         self.fps_limit.setEnabled(self.pro_mode.isChecked())
+        self.pro_resolution.setEnabled(self.pro_mode.isChecked())
         self.fps_custom.setVisible(self.fps_limit.currentData() == "custom")
         self.fps_note.setVisible(not self.pro_mode.isChecked())
         controls = self.data_path() / "controls.ini"

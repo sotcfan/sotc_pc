@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <mutex>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <xxhash.h>
 
@@ -759,6 +762,21 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);
+    // sotcport (diagnostics): SOTC_LOG_RT_SIZES=1 logs each render target size and format once,
+    // to see what resolution the game renders at (2026-10-20, the resolution options).
+    static const bool log_sizes = std::getenv("SOTC_LOG_RT_SIZES") != nullptr;
+    if (log_sizes) {
+        static std::mutex seen_mutex;
+        static std::set<std::tuple<u32, u32, u32>> seen;
+        const auto key = std::make_tuple(image.info.size.width, image.info.size.height,
+                                         static_cast<u32>(image.info.pixel_format));
+        std::scoped_lock lock{seen_mutex};
+        if (seen.insert(key).second) {
+            LOG_INFO(Render, "render target {}x{} {} at {:#x}", image.info.size.width,
+                     image.info.size.height, vk::to_string(image.info.pixel_format),
+                     image.info.guest_address);
+        }
+    }
 
     // Register meta data for this color buffer
     if (desc.info.meta_info.cmask_addr) {

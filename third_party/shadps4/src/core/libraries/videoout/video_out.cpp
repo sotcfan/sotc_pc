@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -308,7 +311,7 @@ s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus*
 }
 
 s32 PS4_SYSV_ABI sceVideoOutGetResolutionStatus(s32 handle, SceVideoOutResolutionStatus* status) {
-    LOG_INFO(Lib_VideoOut, "called");
+    LOG_INFO(Lib_VideoOut, "resolution status: {}x{}", driver->GetPort(handle) ? driver->GetPort(handle)->resolution.full_width : 0, driver->GetPort(handle) ? driver->GetPort(handle)->resolution.full_height : 0);
     auto* port = driver->GetPort(handle);
     if (!port || !port->is_open) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
@@ -488,8 +491,20 @@ s32 PS4_SYSV_ABI sceVideoOutSetWindowModeMargins(s32 handle, s32 top, s32 bottom
 }
 
 void RegisterLib(Core::Loader::SymbolsResolver* sym) {
-    driver = std::make_unique<VideoOutDriver>(EmulatorSettings.GetInternalScreenWidth(),
-                                              EmulatorSettings.GetInternalScreenHeight());
+    // sotcport: SOTC_VIDEO_OUT=<w>x<h> is the TV the game is told it is connected to
+    // (sceVideoOutGetResolutionStatus); the settings shim's 1280x720 otherwise. A PS4 Pro game
+    // may pick its rendering mode from it (4K output).
+    u32 width = EmulatorSettings.GetInternalScreenWidth();
+    u32 height = EmulatorSettings.GetInternalScreenHeight();
+    if (const char* size = std::getenv("SOTC_VIDEO_OUT")) {
+        u32 w = 0, h = 0;
+        if (std::sscanf(size, "%ux%u", &w, &h) == 2 && w && h) {
+            width = w;
+            height = h;
+        }
+    }
+    LOG_INFO(Lib_VideoOut, "the game's TV: {}x{}", width, height);
+    driver = std::make_unique<VideoOutDriver>(width, height);
 
     LIB_FUNCTION("SbU3dwp80lQ", "libSceVideoOut", 1, "libSceVideoOut", sceVideoOutGetFlipStatus);
     LIB_FUNCTION("U46NwOiJpys", "libSceVideoOut", 1, "libSceVideoOut", sceVideoOutSubmitFlip);

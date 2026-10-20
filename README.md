@@ -64,7 +64,8 @@ the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Deb
 `launcher/install-desktop.sh` adds it to the application menu.
 
 - **Display:** fullscreen (borderless, Alt+Enter toggles it), monitor, window size, VSync (present
-  mode), PS4 Pro mode and the frame rate limit.
+  mode), PS4 Pro mode, the frame rate limit and the game's resolution: the PS4 Pro's 1080p mode
+  draws the scene at 1600x900, its 4K mode at 2560x1440 (both run at any frame rate here).
 - **Graphics:** the game engine's own settings (sun shadows and their detail, ambient occlusion,
   anti-aliasing, motion blur, depth of field, bloom, film grain, vignette, anisotropic filtering),
   given to the engine as console variables on its command line, plus the texture size in VRAM.
