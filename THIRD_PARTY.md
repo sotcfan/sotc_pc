@@ -19,6 +19,7 @@ each license text is in the component's folder.
 | [Tracy](https://github.com/wolfpld/tracy) | `third_party/externals/tracy/` | BSD-3-Clause (`LICENSE`) | profiler hooks (inactive in normal builds) |
 | [RenderDoc in-application API](https://renderdoc.org/) | `third_party/externals/renderdoc/` | MIT (in `renderdoc_app.h`) | frame captures for debugging |
 | [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9) | `third_party/externals/LibAtrac9/` | MIT (`LICENSE`, origin in `ORIGIN.txt`) | ATRAC9 audio decoder |
+| [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) (AMD FidelityFX Super Resolution 3.1, native Vulkan; upscaler only) | `third_party/externals/fsr-vulkan/` | MIT (`LICENSE.txt`; AMD SDK notices in `NOTICE.md`, origin in `ORIGIN.txt`) | FSR upscaling |
 | [vgmstream](https://github.com/vgmstream/vgmstream) (HEVAG coefficient table only) | `third_party/externals/vgmstream_hevag/` | ISC-style (`COPYING`, origin in `ORIGIN.txt`) | HEVAG audio decoder |
 
 System libraries linked at build time (not shipped in this repository): SDL3 (zlib), glslang

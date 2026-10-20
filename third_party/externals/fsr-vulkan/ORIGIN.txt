@@ -1,0 +1,12 @@
+FSR-Vulkan: a native Vulkan build of AMD FidelityFX Super Resolution 3.1 (temporal upscaling).
+Source: https://github.com/FireBurn/FSR-Vulkan, commit c64f093404125e960813f95f1996c14780f0dd69
+(2026-09-04), MIT (LICENSE.txt; the AMD FidelityFX SDK files keep their own MIT notices, see
+NOTICE.md and UPSTREAM.md). The same tree the bbport (native Bloodborne port) uses.
+
+Copied for sotcport on 2026-10-20 with only what the FSR 3.1 upscaler needs:
+CMakeLists.txt, cmake/, include/, src/, upstream/ffx-1.1.4/, generated/ffx-1.1.4/ (the precompiled
+upscaler shaders) and generated/ffx-2.3.0/vk/fsr3upscaler-q2-v2/ (a shader table the portable
+library compiles in). Left out: tests/, examples/, tools/, upstream/ffx-2.3.0/ and
+generated/ffx-2.3.0/vk/fsr3framegeneration-q2-v1/ (frame generation and the SDK 2.3 scaffold),
+and a vulkaninfo JSON. Built with FFX_VK_PORTABLE_BUILD_TESTS, _PROBE, _FSR3_3_1_5_SCAFFOLD,
+_FSR4_V07_VULKAN and _INSTALL off. No file was modified.
