@@ -26,6 +26,7 @@
 #include "diag/packet_stats.h"
 #include "game/frame_step.h"
 #include "hle/kernel/filesystem.h"
+#include "hle/np/trophy.h"
 #include "hle/savedata/savedata.h"
 #include "gpu/gpu.h"
 #include "input/game_hooks.h"
@@ -168,6 +169,7 @@ int main(int argc, char** argv) {
         LOG_INFO("Main", "options:{}", options_text.empty() ? " (none)" : options_text);
         hle::kernel::InitializeFilesystem(std::filesystem::absolute(game_dir), data_dir);
         hle::savedata::Initialize(data_dir);
+        hle::np::InitializeTrophies(data_dir);
         input::LoadControls(data_dir.string().c_str()); // controls.ini, before the window opens
 
         if (!loader::CheckGameVersion(game_dir / "eboot.bin")) {

@@ -122,6 +122,10 @@ Keyboard and mouse bindings are in `controls.ini` in the data folder, written wi
 the first run (WASD move, Left Alt walk, mouse/arrows camera, Space ✕, left button □, right
 button R2...); delete it to get the defaults back. F9 writes a marker into the log and saves a
 screenshot.
+Trophies have no PlayStation service behind them: each one is recorded the first time the game
+unlocks it, in `trophies.txt` in the data folder (trophy id, date and time; 38 trophies, 0 is the
+platinum, given with the last of the others). Their names are encrypted in the game's files; the
+icons in `sce_sys/trophy/trophy00.trp` (`TROP000.PNG`...) match the ids.
 
 Environment variables (frame limiter, performance switches, diagnostics): see
 [OPTIONS.md](OPTIONS.md). For play, `SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1` is a good start: a
