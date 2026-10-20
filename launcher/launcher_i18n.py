@@ -55,6 +55,13 @@ PT_BR = {
     "Choose the game folder first": "Escolha a pasta do jogo primeiro",
     "sotcport executable not found": "Executável do sotcport não encontrado",
     "Launcher language": "Idioma do launcher",
+    "Game language": "Idioma do jogo",
+    "Automatic: the system's": "Automático: o do sistema",
+    "The one chosen in the game": "O escolhido no jogo",
+    "Menus and subtitles. The game's own choice is asked on its first start; a language picked "
+    "here replaces it on every start.":
+        "Menus e legendas. O jogo pergunta o idioma na primeira vez que abre; um idioma escolhido "
+        "aqui vale em todas as aberturas no lugar desse.",
     "Takes effect when the launcher is opened again.": "Vale ao abrir o launcher de novo.",
     # Display tab
     "Fullscreen": "Tela cheia",

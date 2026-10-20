@@ -2,11 +2,14 @@
 // There is one local user, id 1, logged in from the start.
 
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 
 #include "common/log.h"
 #include "common/types.h"
 #include "hle/registry.h"
+#include "hle/system/language.h"
 
 namespace hle::system {
 
@@ -89,6 +92,24 @@ constexpr s32 ParamEnterButton = 1000;
 constexpr s32 LanguageEnglishUs = 1;
 constexpr s32 EnterButtonCross = 1;
 
+// The system language (SCE_SYSTEM_PARAM_LANG_*), as BCP 47-like names. Shadow of the Colossus
+// has text and menus in English, Japanese, French (also Canada's), Spanish (Spain's and Latin
+// America's), German, Italian, Dutch, Portuguese (Portugal's and Brazil's), Russian, Korean,
+// Chinese, Polish, Turkish and Arabic (the names in its executable).
+struct Language {
+    std::string_view name;
+    s32 code;
+};
+constexpr Language Languages[] = {
+    {"ja", 0},       {"en", 1},       {"en-US", 1},    {"fr", 2},       {"es", 3},
+    {"de", 4},       {"it", 5},       {"nl", 6},       {"pt", 7},       {"pt-PT", 7},
+    {"ru", 8},       {"ko", 9},       {"zh-Hant", 10}, {"zh-Hans", 11}, {"zh", 11},
+    {"fi", 12},      {"sv", 13},      {"da", 14},      {"no", 15},      {"pl", 16},
+    {"pt-BR", 17},   {"en-GB", 18},   {"tr", 19},      {"es-419", 20},  {"ar", 21},
+    {"fr-CA", 22},
+};
+
+
 struct DisplaySafeAreaInfo {
     float ratio;
     u8 reserved[128];
@@ -129,7 +150,7 @@ PS4_SYSV_ABI s32 sceSystemServiceParamGetInt(s32 id, s32* value) {
         return ErrorSystemParameter;
     }
     switch (id) {
-    case ParamLanguage: *value = LanguageEnglishUs; break;
+    case ParamLanguage: *value = SystemLanguage(); break;
     case ParamDateFormat: *value = 1; break; // DD/MM/YYYY
     case ParamTimeFormat: *value = 1; break; // 24 hours
     case ParamTimeZone: *value = 0; break;
@@ -153,6 +174,35 @@ PS4_SYSV_ABI s32 sceSystemServiceLoadExec(const char* path, char* const*) {
 }
 
 } // namespace
+
+// SOTC_LANGUAGE=<name or code> (OPTIONS.md): the language the game is told the system is in;
+// English (US) otherwise.
+s32 SystemLanguage() {
+    static const s32 language = [] {
+        const char* wanted = std::getenv("SOTC_LANGUAGE");
+        if (!wanted || !*wanted) {
+            return LanguageEnglishUs;
+        }
+        for (const auto& language : Languages) {
+            if (language.name == wanted) {
+                return language.code;
+            }
+        }
+        char* end = nullptr;
+        const long code = std::strtol(wanted, &end, 10);
+        if (*end == '\0' && code >= 0 && code <= 29) {
+            return static_cast<s32>(code);
+        }
+        LOG_WARNING("System", "SOTC_LANGUAGE={}: unknown language; English", wanted);
+        return LanguageEnglishUs;
+    }();
+    return language;
+}
+
+bool SystemLanguageChosen() {
+    const char* wanted = std::getenv("SOTC_LANGUAGE");
+    return wanted && *wanted;
+}
 
 HLE_FUNCTION("libSceUserService", "sceUserServiceInitialize", sceUserServiceInitialize);
 HLE_FUNCTION("libSceUserService", "sceUserServiceGetInitialUser", sceUserServiceGetInitialUser);

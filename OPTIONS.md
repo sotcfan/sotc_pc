@@ -51,6 +51,12 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_VIDEO_OUT=<w>x<h>` | The TV the game is told it is connected to (default 1280x720). With `SOTC_NEO_MODE=1` and `3840x2160` the game offers its PS4 Pro 4K mode (Options, or `+r_Wants4K=WantsHigh`): the 3D scene at 2560x1440 instead of 1600x900, output at 3840x2160 (fitted to the window). The launcher sets it in PS4 Pro mode. |
 | `SOTC_PRESENT_MODE=<mode>` | How frames reach the screen: `Mailbox` (default: no tearing, no waiting), `Fifo` (VSync: waits for the monitor's refresh), `FifoRelaxed` (VSync that tears when a frame is late), `Immediate` (no waiting, tears). |
 
+## Language
+
+| Variable | What it does |
+|---|---|
+| `SOTC_LANGUAGE=<language>` | The game's language for menus and subtitles: `pt-BR`, `pt`, `en-US`, `en-GB`, `es`, `es-419`, `fr`, `fr-CA`, `de`, `it`, `nl`, `da`, `fi`, `no`, `sv`, `pl`, `ru`, `tr`, `ar` (or a `SCE_SYSTEM_PARAM_LANG_*` number). It is the system language the game is told, and it also replaces the language kept in the game's profile on every start (`src/game/language.cpp`). Unset: English (US) on the first start, then the game's own choice. The game (this dump is the European one) also offers the Americas' variants (US English, Canadian French, Brazilian Portuguese, Latin American Spanish): their text is in its data. |
+
 ## Frame rate
 
 The game paces itself at 30 FPS, or at 60 with `SOTC_NEO_MODE=1` (the PS4 Pro's official 60 FPS
@@ -115,6 +121,7 @@ mode, played through the whole game on 2026-10-13). `SOTC_FPS_LIMIT` and `SOTC_U
 | `SOTC_MOUSE_CAMERA_TEST="<from>:<to>:<yaw>:<pitch>"` | Turns the free camera by itself between those seconds of the run, `yaw`/`pitch` radians per camera update, as the mouse would (right and down positive), and logs the angles: for testing the native mouse camera with a key script (`src/input/mouse_camera.cpp`). |
 | `SOTC_MOUSE_SCRIPT="80:move:400:500,82:click:400:545"` | Moves the menu cursor, clicks, presses (`down`) and releases (`up`) the left button, clicks the right button (`right`) or turns the wheel (`wheelup`, `wheeldown`) at those seconds (the `SOTC_KEY_SCRIPT` clock), in the game's UI coordinates (1920 x 1080): for testing the mouse in menus with a script (`src/input/menu_mouse.cpp`). |
 | F7 (key) | Diagnostic sequence: for ~4 s each, turns off one GPU layer optimization after another (shadow copies, SRT patches, bind memo, target cache, texture lookup cache, all of them, then LOD statistics on) and takes 12 screenshots per step, with `DIAG PHASE` lines in the log. For finding which one causes a defect that only shows in one place of the game; keep the camera still meanwhile. |
+| `SOTC_LOG_LANGUAGES=1` | Logs the game's localization manager (languages offered per use, their files and system codes) when the language is set. |
 | `SOTC_LOG_RT_SIZES=1` | Logs each render target size and format once: the resolution the game renders at. |
 | `SOTC_LOG_RT_TABLE=1` | Logs the game's render target size tables (per video mode) each time it makes the views of its targets. |
 | `SOTC_VERIFY_IMAGES=1` | Every 64th texture bound, checks that its memory still holds what its last upload read; logs the stale ones (memory changed without the texture cache noticing): which pages changed, the game's mappings there and its recent map/unmap events. Slows the game down. |

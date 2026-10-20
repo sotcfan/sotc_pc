@@ -25,6 +25,7 @@
 #include "diag/memory_types.h"
 #include "diag/packet_stats.h"
 #include "game/frame_step.h"
+#include "game/language.h"
 #include "game/render_resolution.h"
 #include "hle/kernel/filesystem.h"
 #include "hle/np/trophy.h"
@@ -198,6 +199,7 @@ int main(int argc, char** argv) {
         input::InstallGameHooks();   // split actions (src/input/game_hooks.cpp)
         game::InstallFrameStep();    // the step of time per frame and the physics
         game::InstallRenderResolution(game_args); // the resolution the game renders at
+        game::InstallLanguage();     // the game's languages
         diag::InstallCameraProbe();  // SOTC_PROBE_CAMERA (TEMP)
         diag::InstallDataWatch();    // SOTC_WATCH_DATA
         linker.Link(eboot);

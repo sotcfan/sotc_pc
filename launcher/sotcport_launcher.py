@@ -56,6 +56,17 @@ RESOLUTIONS = [("Native: the monitor's ({})", "native"), ("3840×2160", "3840x21
                ("2560×1440", "2560x1440"), ("1920×1080", "1920x1080"), ("1600×900", "1600x900"),
                ("1280×720", "1280x720"),
                ("The game's menu: the PS4 Pro's modes, enlarged to 1080p or 4K", "")]
+# The game's languages (SOTC_LANGUAGE, src/game/language.cpp): the names are the game's own.
+# "auto" follows the system's language when the game has it; "" leaves the one chosen in the game
+# (asked on its first start and kept in its profile).
+GAME_LANGUAGES = [("Automatic: the system's", "auto"), ("The one chosen in the game", ""),
+                  ("Português Brasileiro", "pt-BR"), ("Português", "pt"),
+                  ("English (US)", "en-US"), ("English (UK)", "en-GB"), ("Español", "es"),
+                  ("Español Latino", "es-419"), ("Français", "fr"),
+                  ("Français (Canada)", "fr-CA"), ("Deutsch", "de"), ("Italiano", "it"),
+                  ("Nederlands", "nl"), ("Dansk", "da"), ("Suomi", "fi"), ("Norsk", "no"),
+                  ("Svenska", "sv"), ("Polski", "pl"), ("Русский", "ru"), ("Türkçe", "tr"),
+                  ("العربية", "ar")]
 FPS_LIMITS = [("30", "30"), ("60", "60"), ("90", "90"), ("120", "120"), ("144", "144"),
               ("165", "165"), ("Uncapped", "uncapped"), ("Custom", "custom")]
 WINDOW_SIZES = [("1280×720", "1280x720"), ("1600×900", "1600x900"), ("1920×1080", "1920x1080"),
@@ -83,6 +94,7 @@ DEFAULTS = {
     "fps_limit": "60",
     "fps_custom": 75,
     "resolution": "native",
+    "game_language": "auto",
     # Graphics (the engine's ConVars; the values are the game's own defaults on a PS4 Pro)
     "sun_shadows": True,
     "shadow_detail": "2",
@@ -146,6 +158,22 @@ def game_problem(path):
     return None
 
 
+def system_game_language():
+    """The game language matching the system's (LANG pt_BR -> pt-BR), or "" if the game has
+    none for it."""
+    from launcher_i18n import system_language
+    code = system_language().replace("_", "-")
+    codes = [value for _, value in GAME_LANGUAGES if value not in ("", "auto")]
+    if code in codes:
+        return code
+    if code in ("en", "en-US") or code.startswith("en-"):
+        return "en-GB" if code == "en-GB" else "en-US"
+    if code.startswith("es-") and code != "es-ES":
+        return "es-419"
+    base = code.split("-")[0]
+    return base if base in codes else ""
+
+
 def fit_16_9(width, height):
     """The largest 16:9 size, in even numbers, that fits in width x height."""
     if width * 9 >= height * 16:
@@ -179,6 +207,9 @@ def game_environment(s, native="1920x1080"):
     else:
         # On an original PS4 the game's logic breaks above 30 FPS (OPTIONS.md, Frame rate).
         env["SOTC_FPS_LIMIT"] = "30"
+    language = system_game_language() if s["game_language"] == "auto" else s["game_language"]
+    if language:
+        env["SOTC_LANGUAGE"] = language
     if s["texture_reduce"]:
         env["SOTC_TEXTURE_REDUCE"] = s["texture_reduce"]
     if s["async_shaders"]:
@@ -337,6 +368,11 @@ class LauncherWindow(QMainWindow):
         form.addRow(tr("sotcport executable"), row)
         form.addRow("", note(tr("Found automatically next to the launcher or in the build "
                                 "folders.")))
+
+        self.game_language = combo(GAME_LANGUAGES, self.settings["game_language"])
+        form.addRow(tr("Game language"), self.game_language)
+        form.addRow("", note(tr("Menus and subtitles. The game's own choice is asked on its first "
+                                "start; a language picked here replaces it on every start.")))
 
         self.ui_language = combo([(name if code else tr("Default"), code)
                                   for code, name in UI_LANGUAGES], self.settings["ui_language"])
@@ -560,6 +596,7 @@ class LauncherWindow(QMainWindow):
         s["data_dir"] = self.data_dir.text().strip()
         s["executable"] = self.executable.text().strip()
         s["ui_language"] = self.ui_language.currentData()
+        s["game_language"] = self.game_language.currentData()
         s["fullscreen"] = self.fullscreen.isChecked()
         s["display"] = self.display.currentData() or ""
         s["window_size"] = self.window_size.currentData()

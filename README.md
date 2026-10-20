@@ -70,6 +70,8 @@ the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Deb
 - **Graphics:** the game engine's own settings (sun shadows and their detail, ambient occlusion,
   anti-aliasing, motion blur, depth of field, bloom, film grain, vignette, anisotropic filtering),
   given to the engine as console variables on its command line, plus the texture size in VRAM.
+- **Game language:** menus and subtitles, by default the system's (Brazilian Portuguese, US
+  English, Canadian French and Latin American Spanish too, which the European dump hides).
 - **Performance, controls (`controls.ini`), advanced** (extra variables and engine arguments).
 
 Its settings are kept in `~/.config/sotcport-launcher/settings.json`.
