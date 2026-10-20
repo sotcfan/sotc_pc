@@ -278,12 +278,13 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
 // way) and the frame rate halved (23 FPS, 77% of the frames over 33 ms). Leaving out the top mip
 // of the 2048x2048 ones took the textures from 2.9 GB to 1 GB: 37 FPS uncapped, and a steady
 // 30 (every frame 33.3 ms) with the 30 FPS limit, where the camera turns through the forest.
-// Automatic below 6 GB of VRAM (heap size); SOTC_TEXTURE_REDUCE=<size> applies it to textures
-// at least that wide and tall on any GPU, 0 turns it off. Only block-compressed 2D textures with
-// a mip chain that are sampled (never drawn to or written).
+// In the open plain the 2048x2048 ones were not enough (23.9 FPS, 95% of the frames over 33 ms
+// uncapped); the 1024x1024 ones too gave 30.5 FPS and 38%, and no visible change at 1080p.
+// Automatic by VRAM (heap size): below 5 GB from 1024x1024, below 6 GB from 2048x2048.
+// SOTC_TEXTURE_REDUCE=<size> applies it to textures at least that wide and tall on any GPU, 0
+// turns it off. Only block-compressed 2D textures with a mip chain that are sampled (never drawn
+// to or written).
 static u32 TextureReduceMinSize(const Vulkan::Instance& instance) {
-    static constexpr u32 AutoMinSize = 2048;
-    static constexpr u64 AutoBelowVram = 6_GB;
     static const u32 size = [&] {
         u32 value = 0;
         if (const char* env = std::getenv("SOTC_TEXTURE_REDUCE")) {
@@ -296,7 +297,7 @@ static u32 TextureReduceMinSize(const Vulkan::Instance& instance) {
                     vram = std::max<u64>(vram, props.memoryHeaps[i].size);
                 }
             }
-            value = vram < AutoBelowVram ? AutoMinSize : 0;
+            value = vram < 5_GB ? 1024 : vram < 6_GB ? 2048 : 0;
         }
         if (value) {
             LOG_INFO(Render_Vulkan,
