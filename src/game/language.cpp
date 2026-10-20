@@ -11,6 +11,9 @@
 //              +0x0c       s32 the language in use
 //              +0x10       u32 mask of the languages this use may take (bit = ELanguage)
 //              +0x20/0x28  std::vector<s32> the languages offered, in order (begin, end)
+//              +0x40/0x48  std::vector<s32> the languages whose text is loaded: the offered ones
+//                          and the ones they fall back to
+//              +0x58+l*0x20  the text tables of language l
 //   manager +0xec8 + l*0x70  one entry per language l (ELanguage order):
 //              +0x00       s32 the language
 //              +0x04       s32 the one to fall back to (-1 none)
@@ -19,7 +22,15 @@
 //              +0x58/0x60  std::vector<s32> the system languages (SCE_SYSTEM_PARAM_LANG_*) that
 //                          choose it
 //
-// At start 0xe2ea00(manager, use) looks the system language up among the use's languages
+// At start (0x931d60) the manager is set up by 0xe2caf0: the language entries, then each use by
+// 0xe2dae0(manager, use, allowed), where `allowed` is the build's mask for that use (a game
+// setting, *(*0x36f79a8 + 0xf8) + 0x2c/0x30/0x34/0x38): it keeps the mask (for the system use,
+// only languages with system codes), lists the offered languages in ELanguage order and the
+// loaded ones (those plus their fallbacks). Then 0xe2ed00(manager, use, folder, file), once per
+// text file (ui, story, system, tutorial, ps4, win...), reads <folder>/_cmn/<file>.<suffix>.ctxt
+// for every loaded language (a missing file is skipped: ps4/win exist for a few languages only).
+// A language without its own text shows its fallback's: pt-BR shows pt.
+// 0xe2ea00(manager, use) then looks the system language up among the use's languages
 // (sceSystemServiceParamGetInt(1)); 0xe2e5d0(manager, language) then sets all four uses with
 // 0xe2e620(manager, use, language), which the game also calls itself when the profile is loaded
 // (with the language kept there) or the player picks one.
@@ -35,9 +46,11 @@
 //
 // ==== What sotcport changes =====================================================================
 //
-// 1. The Americas' variants are offered too, each right after its sibling (en before en-GB,
-//    fr-CA after fr, pt-BR after pt, es-419 after es): the uses' lists are rebuilt in the game's
-//    own heap (its operator new, 0x417070) and the masks get their bits.
+// 1. The Americas' variants are offered too, wherever their sibling is (en with en-GB, fr-CA with
+//    fr, pt-BR with pt, es-419 with es): 0xe2dae0 is hooked and they are added to `allowed`, so
+//    the game lists them (ELanguage order puts each next to its sibling) and loads their text.
+//    Adding them later, to the lists alone, offered pt-BR with pt's text (2026-10-20: its text
+//    had not been loaded).
 // 2. SOTC_LANGUAGE (src/hle/system/language.h) also replaces every language the game sets
 //    (0xe2e620 is hooked), the profile's included: the launcher's choice holds on every start,
 //    not only before the first profile. Without it the game's own choice stands.
@@ -46,11 +59,9 @@
 
 #include "game/language.h"
 
-#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <vector>
 
 #include <fmt/format.h>
 
@@ -63,14 +74,15 @@ namespace game {
 
 namespace {
 
+constexpr u64 SetUpUseAddress = 0xe2dae0;
 constexpr u64 SetUseLanguageAddress = 0xe2e620;
-constexpr u64 OperatorNewAddress = 0x417070;
 
 constexpr u32 UseCount = 4;
 constexpr u32 UseSize = 0x3b0;
 constexpr u32 UseCurrentOffset = 0x0c;
 constexpr u32 UseMaskOffset = 0x10;
 constexpr u32 UseOfferedOffset = 0x20;
+constexpr u32 UseLoadedOffset = 0x40;
 constexpr u32 LanguagesOffset = 0xec8;
 constexpr u32 LanguageSize = 0x70;
 constexpr u32 LanguageCount = 27;
@@ -78,20 +90,19 @@ constexpr u32 LanguageFallbackOffset = 0x04;
 constexpr u32 LanguageSuffixOffset = 0x10;
 constexpr u32 LanguageSystemCodesOffset = 0x58;
 
+using SetUpUseFn = void PS4_SYSV_ABI (*)(u8* manager, s32 use, u32 allowed);
 using SetUseLanguageFn = void PS4_SYSV_ABI (*)(u8* manager, s32 use, s32 language);
-using OperatorNewFn = void* PS4_SYSV_ABI (*)(u64 size);
+SetUpUseFn g_original_set_up_use = nullptr;
 SetUseLanguageFn g_original_set_use_language = nullptr;
 
 bool g_log = false;
-bool g_offered = false; // the extra languages were added
 
-// The extra languages, each with the one it goes next to: {language, sibling, before it}.
+// The extra languages, each with the sibling that brings it in: {language, sibling}.
 struct Extra {
     s32 language;
     s32 sibling;
-    bool before;
 };
-constexpr Extra Extras[] = {{7, 8, true}, {11, 10, false}, {20, 19, false}, {23, 22, false}};
+constexpr Extra Extras[] = {{7, 8}, {11, 10}, {20, 19}, {23, 22}};
 
 template <typename T>
 T Read(const u8* base, u32 offset) {
@@ -115,9 +126,9 @@ void LogManager(const u8* manager, s32 language) {
              fmt::ptr(manager), Read<s32>(manager, 0));
     for (u32 use = 0; use < UseCount; use++) {
         const u8* block = manager + use * UseSize;
-        LOG_INFO("Language", "  use {}: current {}, mask {:#x}, offered [{}]", use,
+        LOG_INFO("Language", "  use {}: current {}, mask {:#x}, offered [{}], loaded [{}]", use,
                  Read<s32>(block, UseCurrentOffset), Read<u32>(block, UseMaskOffset),
-                 IntVector(block, UseOfferedOffset));
+                 IntVector(block, UseOfferedOffset), IntVector(block, UseLoadedOffset));
     }
     for (u32 l = 0; l < LanguageCount; l++) {
         const u8* entry = manager + LanguagesOffset + l * LanguageSize;
@@ -128,44 +139,19 @@ void LogManager(const u8* manager, s32 language) {
     }
 }
 
-template <typename T>
-void Write(u8* base, u32 offset, T value) {
-    std::memcpy(base + offset, &value, sizeof(value));
-}
-
-// Adds the extra languages to a use's offered list and mask (see above). Uses that offer nothing
-// (speech: the game has none) are left alone.
-void OfferExtras(u8* block) {
-    const auto* begin = Read<const s32*>(block, UseOfferedOffset);
-    const auto* end = Read<const s32*>(block, UseOfferedOffset + 8);
-    if (!begin || end <= begin || end - begin > 64) {
-        return;
-    }
-    std::vector<s32> offered(begin, end);
-    u32 mask = Read<u32>(block, UseMaskOffset);
+// 0xe2dae0: sets a use up from the build's mask of the languages it allows (see above).
+void PS4_SYSV_ABI SetUpUse(u8* manager, s32 use, u32 allowed) {
+    const u32 original = allowed;
     for (const auto& extra : Extras) {
-        if (std::ranges::find(offered, extra.language) != offered.end()) {
-            continue;
+        if (allowed & (1u << extra.sibling)) {
+            allowed |= 1u << extra.language;
         }
-        auto sibling = std::ranges::find(offered, extra.sibling);
-        if (sibling == offered.end()) {
-            continue;
-        }
-        offered.insert(extra.before ? sibling : sibling + 1, extra.language);
-        mask |= 1u << extra.language;
     }
-    if (offered.size() == static_cast<size_t>(end - begin)) {
-        return;
+    if (allowed != original) {
+        LOG_INFO("Language", "use {}: languages {:#x} instead of {:#x} (the Americas' variants)",
+                 use, allowed, original);
     }
-    // The game's vector<s32> {begin, end, capacity}: a new buffer from the game's own heap (the
-    // old one is left behind: it was allocated once, at start).
-    const auto operator_new = reinterpret_cast<OperatorNewFn>(OperatorNewAddress);
-    auto* storage = static_cast<s32*>(operator_new(offered.size() * sizeof(s32)));
-    std::memcpy(storage, offered.data(), offered.size() * sizeof(s32));
-    Write(block, UseOfferedOffset, storage);
-    Write(block, UseOfferedOffset + 8, storage + offered.size());
-    Write(block, UseOfferedOffset + 16, storage + offered.size());
-    Write(block, UseMaskOffset, mask);
+    g_original_set_up_use(manager, use, allowed);
 }
 
 // The language whose entry lists `code` among its system languages, or -1.
@@ -184,12 +170,6 @@ s32 LanguageOfSystemCode(const u8* manager, s32 code) {
 }
 
 void PS4_SYSV_ABI SetUseLanguage(u8* manager, s32 use, s32 language) {
-    if (!g_offered) {
-        g_offered = true;
-        for (u32 use = 0; use < UseCount; use++) {
-            OfferExtras(manager + use * UseSize);
-        }
-    }
     // Only where the use takes that language (speech has none: the game sets it to -1).
     const u32 mask = use >= 0 && use < s32(UseCount) ? Read<u32>(manager + use * UseSize,
                                                                   UseMaskOffset)
@@ -213,6 +193,11 @@ void PS4_SYSV_ABI SetUseLanguage(u8* manager, s32 use, s32 language) {
 void InstallLanguage() {
     const char* log = std::getenv("SOTC_LOG_LANGUAGES");
     g_log = log && *log && *log != '0';
+    g_original_set_up_use = reinterpret_cast<SetUpUseFn>(
+        loader::HookFunction(SetUpUseAddress, reinterpret_cast<const void*>(&SetUpUse)));
+    if (!g_original_set_up_use) {
+        LOG_ERROR("Language", "could not hook the language setup at {:#x}", SetUpUseAddress);
+    }
     g_original_set_use_language = reinterpret_cast<SetUseLanguageFn>(loader::HookFunction(
         SetUseLanguageAddress, reinterpret_cast<const void*>(&SetUseLanguage)));
     if (!g_original_set_use_language) {
