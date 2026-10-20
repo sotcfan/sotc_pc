@@ -26,7 +26,10 @@ public:
         return *Common::Singleton<DataBase>::Instance();
     }
 
-    void Open();
+    // sotcport: profile_matches tells whether a stored shader profile (the contents of a
+    // folder's profile.bin) is the one this run translates for: each profile has a cache folder
+    // of its own (see Open in cache_storage.cpp).
+    void Open(const std::function<bool(std::vector<u8>&&)>& profile_matches);
     void Close();
     [[nodiscard]] bool IsOpened() const {
         return opened;

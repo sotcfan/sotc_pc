@@ -306,7 +306,16 @@ void PipelineCache::WarmUp() {
         return;
     }
 
-    Storage::DataBase::Instance().Open();
+    // sotcport: the cache folder is the one translated for this profile (cache_storage.cpp), so
+    // swapping GPUs keeps each GPU's cache.
+    Storage::DataBase::Instance().Open([this](std::vector<u8>&& data) {
+        Shader::Profile cached_profile{};
+        if (data.size() != sizeof(cached_profile)) {
+            return false;
+        }
+        std::memcpy(&cached_profile, data.data(), sizeof(cached_profile));
+        return cached_profile == profile;
+    });
 
     // Check if cache is compatible
     std::vector<u8> profile_data{};

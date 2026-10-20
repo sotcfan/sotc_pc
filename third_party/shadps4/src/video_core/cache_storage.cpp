@@ -90,7 +90,7 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
     }
 }
 
-void DataBase::Open() {
+void DataBase::Open(const std::function<bool(std::vector<u8>&&)>& profile_matches) {
     if (opened) {
         return;
     }
@@ -98,8 +98,10 @@ void DataBase::Open() {
     // sotcport: shadPS4's ElfInfo is not filled in here. The cache holds shaders translated
     // by this build's recompiler, so it is keyed to the sources that decide them
     // (SOTC_SHADER_CACHE_VERSION, third_party/shader_cache_version.cmake): changing them starts
-    // a new cache, and the caches of older versions are removed.
+    // a new cache, and the caches of older versions are removed. Within a version there is a
+    // folder per shader profile (below), all of them kept.
     const std::string cache_name = std::string{"sotcport-"} + SOTC_SHADER_CACHE_VERSION;
+    const std::string profile_prefix = cache_name + "-";
     // sotcport: SOTC_SHADER_CACHE_DIR=<folder> keeps the cache there instead of in the GPU
     // layer's folder: a test build (another cache version) would otherwise remove the player's
     // cache on every run, and the player's build the test build's in turn.
@@ -114,7 +116,8 @@ void DataBase::Open() {
         std::error_code error;
         for (const auto& entry : std::filesystem::directory_iterator{base_dir, error}) {
             const auto name = entry.path().filename().string();
-            if (name.starts_with("sotcport-") && entry.path().stem().string() != cache_name) {
+            if (name.starts_with("sotcport-") && entry.path().stem().string() != cache_name &&
+                !name.starts_with(profile_prefix)) {
                 std::filesystem::remove_all(entry.path(), error);
             }
         }
@@ -135,10 +138,33 @@ void DataBase::Open() {
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
         }
     } else {
-        cache_path = base_dir / cache_name;
+        // sotcport: one folder per shader profile (the GPU's features as the recompiler sees
+        // them, kept in the folder's profile.bin): <cache_name>-0, -1, ... A cache translated
+        // for another profile is no use (PipelineCache::WarmUp would ignore it and save
+        // nothing), so a single folder meant that after swapping GPUs every shader was
+        // translated again on every launch. The first folder whose profile matches is used,
+        // else the first one without a profile (new, or left before its profile was written).
+        // The archive above stays one per version: sotcport never archives
+        // (IsPipelineCacheArchived is false in the shim).
+        for (u32 slot = 0;; ++slot) {
+            cache_path = base_dir / fmt::format("{}{}", profile_prefix, slot);
+            const auto profile_path =
+                cache_path / std::filesystem::path{"profile"}.replace_extension(
+                                 GetBlobFileExtension(BlobType::ShaderProfile));
+            const auto file = IOFile{profile_path, FileAccessMode::Read};
+            if (!file.IsOpen() || file.GetSize() == 0) {
+                break;
+            }
+            std::vector<u8> profile(file.GetSize());
+            file.Read(profile);
+            if (profile_matches(std::move(profile))) {
+                break;
+            }
+        }
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
+        LOG_INFO(Render, "Shader cache folder {}", cache_path.filename().string());
     }
 
     io_worker = std::jthread{ProcessIO};
