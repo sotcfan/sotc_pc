@@ -55,6 +55,13 @@ fi
 # Skip the opening cinematic, "Continue", load the most recent save (~59 s), with the benchmark's
 # own bindings (controls.ini, written below).
 keys="36:Escape,38:K,39:K,40:K,41.5:Space,50:Space,54:Space,58:Space"
+# SOTC_BENCH_MENU_DELAY=<s> presses those keys that many seconds later, for a slow start (a weak
+# GPU, or no shader cache): the opening cinematic and the title screen wait for them. Add the
+# same delay to SOTC_BENCH_SHOTS and SOTC_BENCH_DURATION.
+if [ -n "${SOTC_BENCH_MENU_DELAY:-}" ]; then
+    keys=$(echo "$keys" | tr ',' '\n' | awk -F: -v d="$SOTC_BENCH_MENU_DELAY" \
+        '{ $1 = $1 + d; out = out (NR > 1 ? "," : "") $1 ":" $2 } END { print out }')
+fi
 shots="80,95,110"
 duration=120
 window_from=75
