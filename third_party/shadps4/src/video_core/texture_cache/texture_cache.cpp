@@ -1,13 +1,18 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
+#include <unordered_map>
 #include <xxhash.h>
 
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
 #include "common/hash.h"
+#include "common/path_util.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "hle/kernel/gpu_memory.h" // sotcport: DescribeAliases (SOTC_VERIFY_IMAGES)
@@ -20,6 +25,7 @@
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include <vk_mem_alloc.h> // sotcport: SOTC_VRAM_DUMP
 #include "perf_temp.h" // sotcport TEMP
 
 namespace VideoCore {
@@ -265,6 +271,55 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     return cache_image_id;
 }
 
+// sotcport (2026-10-20): large textures leave out their top mip on the GPU (Image::skip_levels),
+// a quarter of their memory, on GPUs whose VRAM cannot hold the game's textures. On a GTX 1650
+// (4 GB) the Forest of Giants used 2.4 GB of textures in a single frame (737 of them 2048x2048
+// BC), 1.2 GB of buffers on top: the driver moved memory over PCIe all the time (3.5 GB/s each
+// way) and the frame rate halved (23 FPS, 77% of the frames over 33 ms). Leaving out the top mip
+// of the 2048x2048 ones took the textures from 2.9 GB to 1 GB: 37 FPS uncapped, and a steady
+// 30 (every frame 33.3 ms) with the 30 FPS limit, where the camera turns through the forest.
+// Automatic below 6 GB of VRAM (heap size); SOTC_TEXTURE_REDUCE=<size> applies it to textures
+// at least that wide and tall on any GPU, 0 turns it off. Only block-compressed 2D textures with
+// a mip chain that are sampled (never drawn to or written).
+static u32 TextureReduceMinSize(const Vulkan::Instance& instance) {
+    static constexpr u32 AutoMinSize = 2048;
+    static constexpr u64 AutoBelowVram = 6_GB;
+    static const u32 size = [&] {
+        u32 value = 0;
+        if (const char* env = std::getenv("SOTC_TEXTURE_REDUCE")) {
+            value = static_cast<u32>(std::strtoul(env, nullptr, 10));
+        } else {
+            u64 vram = 0;
+            const auto props = instance.GetPhysicalDevice().getMemoryProperties();
+            for (u32 i = 0; i < props.memoryHeapCount; ++i) {
+                if (props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+                    vram = std::max<u64>(vram, props.memoryHeaps[i].size);
+                }
+            }
+            value = vram < AutoBelowVram ? AutoMinSize : 0;
+        }
+        if (value) {
+            LOG_INFO(Render_Vulkan,
+                     "textures of {}x{} and up leave out their top mip (SOTC_TEXTURE_REDUCE=0 "
+                     "keeps them whole)",
+                     value, value);
+        }
+        return value;
+    }();
+    return size;
+}
+
+u32 TextureCache::TextureSkipLevels(const ImageInfo& info) const {
+    const u32 min_size = TextureReduceMinSize(instance);
+    if (min_size == 0 || !info.props.is_block || info.props.is_volume || info.props.is_depth ||
+        info.type != AmdGpu::ImageType::Color2D || info.resources.layers != 1 ||
+        info.resources.levels < 2 || info.num_samples != 1 || info.size.width < min_size ||
+        info.size.height < min_size) {
+        return 0;
+    }
+    return 1;
+}
+
 std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& image_info,
                                                            BindingType binding,
                                                            ImageId cache_image_id,
@@ -498,7 +553,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                 // We need to have a larger, already allocated image to copy this one into
                 if (merged_image_id) {
                     auto& merged_image = slot_images[merged_image_id];
-                    runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                    // sotcport: nothing to copy from a reduced image (see ExpandImage).
+                    if (cache_image.skip_levels == 0) {
+                        runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                    }
                     FreeImage(cache_image_id);
                 }
             }
@@ -516,7 +574,11 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& new_image = slot_images[new_image_id];
 
     RefreshImage(new_image);
-    runtime.CopyImage(&src_image, &new_image);
+    // sotcport: a reduced image (Image::skip_levels) only holds what the CPU wrote, which the
+    // refresh above has just read from guest memory, and its levels do not line up.
+    if (src_image.skip_levels == 0) {
+        runtime.CopyImage(&src_image, &new_image);
+    }
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
         src_image.binding.needs_rebind = 1u;
@@ -618,9 +680,16 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // perfect match; anything with side effects (expanding, converting, copying, freeing)
     // registers or unregisters images.
     last_find_direct = registry_generation == start_generation;
+    // sotcport: a reduced image (Image::skip_levels) cannot be drawn to or written: for any
+    // other use it goes, and a whole one is made from guest memory (which has all of its data).
+    if (image_id && slot_images[image_id].skip_levels != 0 && desc.type != BindingType::Texture) {
+        FreeImage(image_id);
+        image_id = {};
+    }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.Insert(instance, runtime, slot_image_views, info);
+        const u32 skip_levels = desc.type == BindingType::Texture ? TextureSkipLevels(info) : 0;
+        image_id = slot_images.Insert(instance, runtime, slot_image_views, info, skip_levels);
         RegisterImage(image_id);
     }
 
@@ -790,7 +859,8 @@ void TextureCache::RefreshImage(Image& image, u64 invalidations_before) {
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
     SmallVector<vk::BufferImageCopy, 14> image_copies;
-    for (u32 m = 0; m < num_mips; m++) {
+    // sotcport: a reduced image (Image::skip_levels) gets the guest's mips from skip_levels on.
+    for (u32 m = image.skip_levels; m < num_mips; m++) {
         const u32 width = std::max(image.info.size.width >> m, 1u);
         const u32 height = std::max(image.info.size.height >> m, 1u);
         const u32 depth =
@@ -804,7 +874,7 @@ void TextureCache::RefreshImage(Image& image, u64 invalidations_before) {
             .bufferImageHeight = mip_height,
             .imageSubresource{
                 .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
-                .mipLevel = m,
+                .mipLevel = m - image.skip_levels,
                 .baseArrayLayer = 0,
                 .layerCount = num_layers,
             },
@@ -1058,6 +1128,92 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
 void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
+    }
+    // sotcport (2026-10-20, GTX 1650 VRAM work): SOTC_VRAM_DUMP=<seconds>: once, that many
+    // seconds after the first frame, logs the images by kind (render targets, storage, textures;
+    // and how many ticks since each was used) and writes the allocator's statistics, every
+    // allocation with its size and usage, to <log dir>/vram_dump.json.
+    {
+        static const double dump_at = [] {
+            const char* env = std::getenv("SOTC_VRAM_DUMP");
+            return env ? std::atof(env) : 0.0;
+        }();
+        static const auto start = std::chrono::steady_clock::now();
+        static bool dumped = false;
+        if (dump_at > 0.0 && !dumped &&
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >=
+                dump_at) {
+            dumped = true;
+            struct Sum {
+                u64 bytes = 0;
+                u64 count = 0;
+                u64 cold_bytes = 0; // not used in the last 300 ticks
+            };
+            Sum targets, storage, textures;
+            std::unordered_map<VAddr, std::vector<u64>> by_address;
+            std::vector<std::pair<u64, u64>> ages;
+            image_lru_cache.ForEachItemBelow(gc_tick, [&](Image& image) {
+                u64 bytes = 0;
+                for (const auto& backing : image.backing_images) {
+                    bytes += backing.image.size_bytes;
+                }
+                const auto usage = image.usage_flags;
+                Sum& sum = (usage & (vk::ImageUsageFlagBits::eColorAttachment |
+                                     vk::ImageUsageFlagBits::eDepthStencilAttachment))
+                               ? targets
+                           : (usage & vk::ImageUsageFlagBits::eStorage) ? storage
+                                                                         : textures;
+                sum.bytes += bytes;
+                ++sum.count;
+                if (scheduler.CurrentTick() - image.tick_accessed_last > 1000) {
+                    sum.cold_bytes += bytes; // not used in the last 1000 submissions
+                }
+                by_address[image.info.guest_address].push_back(bytes);
+                ages.push_back({scheduler.CurrentTick() - image.tick_accessed_last, bytes});
+                return false;
+            });
+            // Images sharing a guest address (the same memory seen with another format, size or
+            // mip count), and how long ago the images were last used, in submissions.
+            u64 dup_images = 0, dup_bytes = 0, dup_addresses = 0;
+            for (const auto& [address, sizes] : by_address) {
+                if (sizes.size() > 1) {
+                    ++dup_addresses;
+                    dup_images += sizes.size() - 1;
+                    u64 total = 0, largest = 0;
+                    for (const u64 size : sizes) {
+                        total += size;
+                        largest = std::max(largest, size);
+                    }
+                    dup_bytes += total - largest;
+                }
+            }
+            u64 age_bytes[5]{};
+            for (const auto& [age, bytes] : ages) {
+                age_bytes[age < 10 ? 0 : age < 100 ? 1 : age < 1000 ? 2 : age < 10000 ? 3 : 4] +=
+                    bytes;
+            }
+            LOG_WARNING(Render_Vulkan,
+                        "VRAM DUMP: {} guest addresses with more than one image: {} extra images, "
+                        "{} MB beyond the largest of each; image MB by submissions since last use: "
+                        "<10 {}, <100 {}, <1000 {}, <10000 {}, more {}; current tick {}",
+                        dup_addresses, dup_images, dup_bytes >> 20, age_bytes[0] >> 20,
+                        age_bytes[1] >> 20, age_bytes[2] >> 20, age_bytes[3] >> 20,
+                        age_bytes[4] >> 20, scheduler.CurrentTick());
+            LOG_WARNING(Render_Vulkan,
+                        "VRAM DUMP: device usage {} MB; images: render targets {} ({} MB, {} MB "
+                        "cold), storage {} ({} MB, {} MB cold), textures {} ({} MB, {} MB cold)",
+                        total_used_memory >> 20, targets.count, targets.bytes >> 20,
+                        targets.cold_bytes >> 20, storage.count, storage.bytes >> 20,
+                        storage.cold_bytes >> 20, textures.count, textures.bytes >> 20,
+                        textures.cold_bytes >> 20);
+            char* stats = nullptr;
+            vmaBuildStatsString(instance.GetAllocator(), &stats, VK_TRUE);
+            const auto path =
+                Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "vram_dump.json";
+            std::ofstream{path} << stats;
+            vmaFreeStatsString(instance.GetAllocator(), stats);
+            LOG_WARNING(Render_Vulkan, "VRAM DUMP: allocator statistics in {}", path.string());
+        }
     }
     // sotcport: VRAM use for the PERF report, and a warning when it reaches the critical level
     // (above it the driver starts moving memory to system RAM).

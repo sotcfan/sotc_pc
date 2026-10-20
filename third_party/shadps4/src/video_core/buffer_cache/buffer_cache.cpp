@@ -760,6 +760,10 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         return false;
     }
     Image& image = texture_cache.GetImage(image_id);
+    // sotcport: a reduced texture (Image::skip_levels) has nothing guest memory does not.
+    if (image.skip_levels != 0) {
+        return false;
+    }
     ASSERT_MSG(device_addr == image.info.guest_address,
                "Texel buffer aliases image subresources {:x} : {:x}", device_addr,
                image.info.guest_address);

@@ -97,11 +97,15 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
     if (!info.is_storage) {
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
     }
+    // sotcport: the view's levels in the host image (see Image::skip_levels).
+    const SubresourceRange host_range = image.HostRange(info.range);
     vk::ImageViewMinLodCreateInfoEXT min_lod_ci{};
     if (info.min_lod != 0 && instance.IsImageViewMinLodSupported()) {
         const float last_level =
-            static_cast<float>(info.range.base.level + info.range.extent.levels - 1);
-        min_lod_ci.minLod = std::min(static_cast<float>(info.min_lod) / 256.f, last_level);
+            static_cast<float>(host_range.base.level + host_range.extent.levels - 1);
+        const float min_lod = std::max(
+            static_cast<float>(info.min_lod) / 256.f - static_cast<float>(image.skip_levels), 0.f);
+        min_lod_ci.minLod = std::min(min_lod, last_level);
         usage_ci.pNext = &min_lod_ci;
     }
     // When sampling D32/D16 texture from shader, the T# specifies R32/R16 format so adjust it.
@@ -130,8 +134,8 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         .components = components,
         .subresourceRange{
             .aspectMask = aspect,
-            .baseMipLevel = info.range.base.level,
-            .levelCount = info.range.extent.levels,
+            .baseMipLevel = host_range.base.level,
+            .levelCount = host_range.extent.levels,
             .baseArrayLayer = info.range.base.layer,
             .layerCount = info.range.extent.layers,
         },

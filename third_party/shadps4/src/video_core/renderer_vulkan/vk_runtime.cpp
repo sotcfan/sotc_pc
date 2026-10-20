@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "perf_temp.h" // sotcport TEMP
 #include <atomic>
+#include "perf_temp.h" // sotcport TEMP
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -103,6 +103,22 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     memory_barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
     memory_barrier.dstAccessMask =
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+}
+
+// sotcport (2026-10-20): images with levels left out (VideoCore::Image::skip_levels) are textures
+// the CPU fills: their data is in guest memory, and their levels do not line up with the guest's.
+// The texture cache never needs copies, clears or downloads of them; should one come anyway, it
+// is skipped (logged) rather than reading or writing the wrong levels.
+static bool InvolvesReducedImage(const VideoCore::Image* a, const VideoCore::Image* b,
+                                 const char* what) {
+    if ((a && a->skip_levels != 0) || (b && b->skip_levels != 0)) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+            LOG_WARNING(Render_Vulkan, "{} with a reduced texture: skipped", what);
+        }
+        return true;
+    }
+    return false;
 }
 
 void Runtime::TickFrame() {
@@ -230,6 +246,9 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
                             std::span<const vk::BufferImageCopy> download_copies) {
+    if (InvolvesReducedImage(src, nullptr, "DownloadImage")) {
+        return;
+    }
     SetBackingSamples(src, src->info.num_samples);
     scheduler.EndRendering();
 
@@ -256,6 +275,9 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
 }
 
 void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
+    if (InvolvesReducedImage(src, dst, "CopyImage")) {
+        return;
+    }
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
 
     // Format mismatch warning (safe but useful)
@@ -355,6 +377,9 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                                   const VideoCore::Buffer* buffer, u64 offset) {
+    if (InvolvesReducedImage(src, dst, "CopyImageWithBuffer")) {
+        return;
+    }
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
     // sotcport: copies mip 0 of the layers both have instead of aborting. A depth <-> color
@@ -429,6 +454,9 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
 }
 
 void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice) {
+    if (InvolvesReducedImage(src, dst, "CopyMip")) {
+        return;
+    }
     const auto dst_dim = dst->info.props.is_block ? 2 : 0;
     const auto mip_block_w = std::max(dst->info.size.width >> (mip + dst_dim), 1u);
     const auto mip_block_h = std::max(dst->info.size.height >> (mip + dst_dim), 1u);
@@ -481,6 +509,9 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    if (InvolvesReducedImage(src, dst, "CopyColorAndDepth")) {
+        return;
+    }
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
         if ((instance.IsMaintenance8Supported() ||
              src->info.props.is_depth == dst->info.props.is_depth) &&
@@ -517,6 +548,9 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                                const VideoCore::SubresourceRange& sub_range) {
+    if (InvolvesReducedImage(src, dst, "CopyDepthStencil")) {
+        return;
+    }
     scheduler.EndRendering();
 
     bool needs_flush =
@@ -559,6 +593,9 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
+    if (InvolvesReducedImage(src, dst, "ResolveImage")) {
+        return;
+    }
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -624,6 +661,9 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
+    if (InvolvesReducedImage(dst, nullptr, "ClearImage")) {
+        return;
+    }
     scheduler.EndRendering();
 
     const bool needs_flush =

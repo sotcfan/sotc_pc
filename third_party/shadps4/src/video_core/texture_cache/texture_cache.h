@@ -174,6 +174,9 @@ public:
                                                                ImageId merged_image_id);
 
     /// Resolves depth overlap and either re-creates the image or returns existing one
+    /// sotcport: levels a new texture leaves out (Image::skip_levels, SOTC_TEXTURE_REDUCE).
+    u32 TextureSkipLevels(const ImageInfo& info) const;
+
     [[nodiscard]] ImageId ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
                                               ImageId cache_img_id);
 

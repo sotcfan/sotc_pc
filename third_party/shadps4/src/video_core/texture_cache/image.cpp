@@ -124,8 +124,10 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
-             Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_)
-    : runtime{&runtime_}, slot_image_views{&slot_image_views_}, info{info_} {
+             Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_,
+             u32 skip_levels_)
+    : runtime{&runtime_}, slot_image_views{&slot_image_views_}, info{info_},
+      skip_levels{skip_levels_} {
     if (info.pixel_format == vk::Format::eUndefined) {
         return;
     }
@@ -176,12 +178,13 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
         .flags = flags,
         .imageType = ConvertImageType(info.type),
         .format = supported_format,
+        // sotcport: the guest's mip `skip_levels` and down (see skip_levels).
         .extent{
-            .width = info.size.width,
-            .height = info.size.height,
+            .width = std::max(info.size.width >> skip_levels, 1u),
+            .height = std::max(info.size.height >> skip_levels, 1u),
             .depth = info.size.depth,
         },
-        .mipLevels = static_cast<u32>(info.resources.levels),
+        .mipLevels = HostLevels(),
         .arrayLayers = static_cast<u32>(info.resources.layers),
         .samples = LiverpoolToVK::NumSamples(info.num_samples, supported_samples),
         .tiling = tiling,
@@ -225,14 +228,19 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
 
+    // sotcport: everything below is in the host image's levels (see skip_levels).
+    if (subres_range) {
+        subres_range = HostRange(*subres_range);
+    }
+    const SubresourceExtent host_resources{static_cast<u16>(HostLevels()), info.resources.layers};
     const bool needs_partial_transition =
         subres_range &&
-        (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources);
+        (subres_range->base != SubresourceBase{} || subres_range->extent != host_resources);
     const bool partially_transited = !subresource_states.empty();
 
     if (needs_partial_transition || partially_transited) {
         if (!partially_transited) {
-            subresource_states.resize(info.resources.levels * info.resources.layers);
+            subresource_states.resize(HostLevels() * info.resources.layers);
             std::fill(subresource_states.begin(), subresource_states.end(), last_state);
         }
 
@@ -242,7 +250,7 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         const u32 start_mip = needs_partial_transition ? subres_range->base.level : u16{0};
         const u32 end_mip = needs_partial_transition
                                 ? subres_range->base.level + subres_range->extent.levels
-                                : info.resources.levels;
+                                : HostLevels();
         const u32 start_layer = needs_partial_transition ? subres_range->base.layer : u16{0};
         const u32 end_layer = needs_partial_transition
                                   ? subres_range->base.layer + subres_range->extent.layers

@@ -81,8 +81,10 @@ public:
 };
 
 struct Image : public Common::LRUNode<> {
+    /// skip_levels: see Image::skip_levels (sotcport).
     explicit Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime,
-                   Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
+                   Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info,
+                   u32 skip_levels = 0);
     ~Image();
 
     Image(const Image&) = delete;
@@ -165,6 +167,36 @@ public:
     u64 lru_id{};
     u64 tick_accessed_last{};
     u64 hash{};
+
+    /// sotcport (2026-10-20): levels at the top of the guest's mip chain left out of the host
+    /// image, 0 or 1, to make the game fit on GPUs with little VRAM (SOTC_TEXTURE_REDUCE,
+    /// texture_cache.cpp). With 1 the host image is the guest's mip 1 and down: half the width
+    /// and height, a quarter of the memory. Host level n holds guest level n + skip_levels, and
+    /// a guest level above the host's first (mip 0) is read from host level 0, the next one
+    /// down. Sampling with implicit LOD needs nothing else: the hardware picks the level from
+    /// the host image's size, so it uses guest mip 1 where the console used mip 0 and the same
+    /// mips as the console further away. Only textures the CPU fills (never written by the GPU)
+    /// are reduced, so copies between images never need their data: guest memory has it.
+    u32 skip_levels{};
+
+    u32 HostLevel(u32 guest_level) const {
+        return guest_level > skip_levels ? guest_level - skip_levels : 0;
+    }
+    u32 HostLevels() const {
+        return info.resources.levels - skip_levels;
+    }
+    /// A guest subresource range in the host image's levels.
+    SubresourceRange HostRange(const SubresourceRange& range) const {
+        if (skip_levels == 0) {
+            return range;
+        }
+        const u32 first = HostLevel(range.base.level);
+        const u32 last = HostLevel(range.base.level + range.extent.levels - 1);
+        SubresourceRange host = range;
+        host.base.level = static_cast<u16>(first);
+        host.extent.levels = static_cast<u16>(last - first + 1);
+        return host;
+    }
     /// sotcport (SOTC_VERIFY_IMAGES=1): hash of the guest memory the last upload read, 0 when
     /// it came from the GPU's copy or is not known (see TextureCache::VerifyImage).
     u64 upload_hash{};
