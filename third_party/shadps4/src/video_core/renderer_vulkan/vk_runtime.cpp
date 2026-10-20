@@ -519,9 +519,20 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
             CopyImage(src, dst);
         } else {
             // Perform depth from/to color copy using the intermediate copy buffer.
-            static constexpr size_t COPY_BUFFER_SIZE = 128_MB;
+            // sotcport (2026-10-20): as large as the copy (mip 0 of the layers both have, see
+            // CopyImageWithBuffer), not a fixed 128 MB: two of those were alive at once, 256 MB of
+            // VRAM for copies of 8-15 MB, on a 4 GB card that was already paging (GTX 1650).
+            const vk::BufferImageCopy copy_layout = {
+                .imageSubresource{
+                    .aspectMask = src->aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+                    .layerCount = std::min(src->info.resources.layers, dst->info.resources.layers),
+                },
+                .imageExtent = {src->info.size.width, src->info.size.height,
+                                src->info.size.depth},
+            };
+            const u64 copy_size = BufferImageCopySize(copy_layout, src->info.pixel_format);
             const auto copy_ref =
-                staging_pool.Request(COPY_BUFFER_SIZE, VideoCore::MemoryType::DeviceLocal);
+                staging_pool.Request(copy_size, VideoCore::MemoryType::DeviceLocal);
             CopyImageWithBuffer(src, dst, copy_ref.buffer, copy_ref.offset);
         }
     } else if (src->info.num_samples == 1 && dst->info.num_samples > 1 &&
