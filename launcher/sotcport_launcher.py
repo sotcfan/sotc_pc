@@ -47,13 +47,15 @@ PRESENT_MODES = [("Mailbox: no tearing, no waiting (recommended)", "Mailbox"),
                  ("FIFO: waits for the monitor's refresh", "Fifo"),
                  ("FIFO Relaxed: tears when a frame is late", "FifoRelaxed"),
                  ("Immediate: no waiting, tears", "Immediate")]
-# The PS4 Pro's two video modes (the engine's r_Wants4K, an EWantsDisplayMode), measured with
-# SOTC_LOG_RT_SIZES on 2026-10-20: "1080p 60FPS" renders the scene at 1600x900 and outputs 1080p;
-# "4K 30FPS" renders at 2560x1440 and outputs 3840x2160 (paced by sotcport, it runs at any rate).
-# "" leaves it to the game's own options menu (saved in its profile).
-PRO_RESOLUTIONS = [("The game's menu (PS4 Pro mode option)", ""),
-                   ("1600×900 (PS4 Pro 1080p 60FPS mode)", "WantsPerf"),
-                   ("2560×1440 (PS4 Pro 4K 30FPS mode)", "WantsHigh")]
+# The resolution the game renders and outputs at (SOTC_RESOLUTION, src/game/render_resolution.cpp):
+# the picture leaves the game at the size it was drawn at, no upscaling. "native" is the
+# monitor's (the largest 16:9 size that fits it: the game's camera is 16:9). "" leaves it to the
+# game's own PS4 Pro modes (its options menu): the 1080p one draws at 1600x900 and enlarges to
+# 1920x1080, the 4K one draws at 2560x1440 and enlarges to 3840x2160.
+RESOLUTIONS = [("Native: the monitor's ({})", "native"), ("3840×2160", "3840x2160"),
+               ("2560×1440", "2560x1440"), ("1920×1080", "1920x1080"), ("1600×900", "1600x900"),
+               ("1280×720", "1280x720"),
+               ("The game's menu: the PS4 Pro's modes, enlarged to 1080p or 4K", "")]
 FPS_LIMITS = [("30", "30"), ("60", "60"), ("90", "90"), ("120", "120"), ("144", "144"),
               ("165", "165"), ("Uncapped", "uncapped"), ("Custom", "custom")]
 WINDOW_SIZES = [("1280×720", "1280x720"), ("1600×900", "1600x900"), ("1920×1080", "1920x1080"),
@@ -80,7 +82,7 @@ DEFAULTS = {
     "pro_mode": True,
     "fps_limit": "60",
     "fps_custom": 75,
-    "pro_resolution": "",
+    "resolution": "native",
     # Graphics (the engine's ConVars; the values are the game's own defaults on a PS4 Pro)
     "sun_shadows": True,
     "shadow_detail": "2",
@@ -144,8 +146,16 @@ def game_problem(path):
     return None
 
 
-def game_environment(s):
-    """sotcport's options (OPTIONS.md) as environment variables, from the launcher settings."""
+def fit_16_9(width, height):
+    """The largest 16:9 size, in even numbers, that fits in width x height."""
+    if width * 9 >= height * 16:
+        return (height * 16 // 9) & ~1, height & ~1
+    return width & ~1, (width * 9 // 16) & ~1
+
+
+def game_environment(s, native="1920x1080"):
+    """sotcport's options (OPTIONS.md) as environment variables, from the launcher settings.
+    `native`: the monitor's 16:9 size, for the "native" resolution."""
     env = {}
     env["SOTC_FULLSCREEN"] = "1" if s["fullscreen"] else "0"
     if s["display"]:
@@ -154,8 +164,12 @@ def game_environment(s):
     env["SOTC_PRESENT_MODE"] = s["present_mode"]
     if s["pro_mode"]:
         env["SOTC_NEO_MODE"] = "1"
-        # A 4K TV, as a PS4 Pro's: the game offers its 4K mode only on one (OPTIONS.md).
-        env["SOTC_VIDEO_OUT"] = "3840x2160"
+        resolution = native if s["resolution"] == "native" else s["resolution"]
+        if resolution:
+            env["SOTC_RESOLUTION"] = resolution
+        else:
+            # A 4K TV, as a PS4 Pro's: the game's menu offers its 4K mode only on one.
+            env["SOTC_VIDEO_OUT"] = "3840x2160"
         if s["fps_limit"] == "uncapped":
             env["SOTC_UNCAPPED"] = "1"
         elif s["fps_limit"] == "custom":
@@ -187,8 +201,6 @@ def game_convars(s):
     the game's defaults (the engine reads "+name=value" from its command line). The names and
     defaults come from the engine's own list (`+help`, 2026-10-20)."""
     args = []
-    if s["pro_mode"] and s["pro_resolution"]:
-        args.append(f"+r_Wants4K={s['pro_resolution']}")
     if not s["sun_shadows"]:
         args.append("+r_enableCascadeShadows=0")
     if s["shadow_detail"] != "2":
@@ -216,7 +228,8 @@ def game_convars(s):
 
 
 def connected_displays(executable):
-    """(SOTC_DISPLAY value, label) per monitor, from `sotcport --list-displays`; [] if unknown."""
+    """The monitors from `sotcport --list-displays`: dicts with the SOTC_DISPLAY value, a label,
+    the desktop size and whether it is the primary one; [] if unknown."""
     if not executable:
         return []
     try:
@@ -229,7 +242,12 @@ def connected_displays(executable):
         fields = line.split("\t")
         if len(fields) == 5:
             number, name, size, hertz, primary = fields
-            displays.append((number, f"{number}: {name} ({size}, {hertz} Hz)"))
+            try:
+                width, height = (int(x) for x in size.split("x"))
+            except ValueError:
+                continue
+            displays.append({"value": number, "label": f"{number}: {name} ({size}, {hertz} Hz)",
+                             "size": (width, height), "primary": primary == "1"})
     return displays
 
 
@@ -370,11 +388,10 @@ class LauncherWindow(QMainWindow):
         self.fps_note = note(tr("Only 30 FPS without the PS4 Pro mode"))
         form.addRow("", self.fps_note)
 
-        self.pro_resolution = combo(PRO_RESOLUTIONS, self.settings["pro_resolution"])
-        form.addRow(tr("Game resolution"), self.pro_resolution)
-        form.addRow("", note(tr("The resolution the game draws its 3D scene at; the PS4 Pro's 4K "
-                                "mode draws at 1440p and enlarges to 4K, then the image is fitted "
-                                "to the window. Needs the PS4 Pro mode.")))
+        self.resolution = combo(RESOLUTIONS, self.settings["resolution"])
+        form.addRow(tr("Game resolution"), self.resolution)
+        form.addRow("", note(tr("The game draws and outputs at this size, with no upscaling. "
+                                "Needs the PS4 Pro mode.")))
         return page
 
     def build_graphics_tab(self):
@@ -513,10 +530,26 @@ class LauncherWindow(QMainWindow):
         current = self.display.currentData() if self.display.count() else self.settings["display"]
         self.display.clear()
         self.display.addItem(tr("Automatic"), "")
-        for value, label in connected_displays(find_executable(self.store())):
-            self.display.addItem(label, value)
+        self.displays = connected_displays(find_executable(self.store()))
+        for display in self.displays:
+            self.display.addItem(display["label"], display["value"])
         index = self.display.findData(current)
         self.display.setCurrentIndex(max(index, 0))
+        if hasattr(self, "resolution"):
+            self.update_state()
+
+    def native_size(self):
+        """The 16:9 size that fits the chosen monitor (the primary one for "Automatic"), as
+        <w>x<h>; 1920x1080 when the monitors are unknown."""
+        chosen = self.display.currentData() if self.display.count() else ""
+        displays = getattr(self, "displays", [])
+        display = next((d for d in displays if d["value"] == chosen), None) or \
+            next((d for d in displays if d["primary"]), None) or \
+            (displays[0] if displays else None)
+        if not display:
+            return "1920x1080"
+        width, height = fit_16_9(*display["size"])
+        return f"{width}x{height}"
 
     def store(self):
         """The settings as the pages show them (also saved, when the pages exist)."""
@@ -534,7 +567,7 @@ class LauncherWindow(QMainWindow):
         s["pro_mode"] = self.pro_mode.isChecked()
         s["fps_limit"] = self.fps_limit.currentData()
         s["fps_custom"] = self.fps_custom.value()
-        s["pro_resolution"] = self.pro_resolution.currentData()
+        s["resolution"] = self.resolution.currentData()
         s["sun_shadows"] = self.sun_shadows.isChecked()
         s["shadow_detail"] = self.shadow_detail.currentData()
         s["ao_mode"] = self.ao_mode.currentData()
@@ -562,7 +595,9 @@ class LauncherWindow(QMainWindow):
         executable = find_executable(s)
         running = self.process is not None
         self.fps_limit.setEnabled(self.pro_mode.isChecked())
-        self.pro_resolution.setEnabled(self.pro_mode.isChecked())
+        self.resolution.setEnabled(self.pro_mode.isChecked())
+        self.resolution.setItemText(0, tr("Native: the monitor's ({})").format(
+            self.native_size().replace("x", "×")))
         self.fps_custom.setVisible(self.fps_limit.currentData() == "custom")
         self.fps_note.setVisible(not self.pro_mode.isChecked())
         controls = self.data_path() / "controls.ini"
@@ -618,11 +653,11 @@ class LauncherWindow(QMainWindow):
             arguments += ["--"] + game_args
 
         environment = QProcessEnvironment.systemEnvironment()
-        for key, value in game_environment(s).items():
+        for key, value in game_environment(s, self.native_size()).items():
             environment.insert(key, value)
 
         self.log.clear()
-        settings_env = " ".join(f"{k}={v}" for k, v in game_environment(s).items())
+        settings_env = " ".join(f"{k}={v}" for k, v in game_environment(s, self.native_size()).items())
         self.append_log(f"$ {settings_env} {executable} {' '.join(arguments)}\n")
         self.process = QProcess(self)
         self.process.setProcessEnvironment(environment)

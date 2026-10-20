@@ -502,6 +502,11 @@ void RegisterLib(Core::Loader::SymbolsResolver* sym) {
             width = w;
             height = h;
         }
+    } else if (const char* resolution = std::getenv("SOTC_RESOLUTION"); resolution && *resolution) {
+        // SOTC_RESOLUTION sizes the game's 4K mode (src/game/render_resolution.cpp), which the
+        // game uses only on a TV taller than 1080 lines.
+        width = 3840;
+        height = 2160;
     }
     LOG_INFO(Lib_VideoOut, "the game's TV: {}x{}", width, height);
     driver = std::make_unique<VideoOutDriver>(width, height);
