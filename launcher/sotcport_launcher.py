@@ -25,7 +25,8 @@ from PySide6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFontDatabase, QTextCursor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+    QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -76,6 +77,27 @@ AO_MODES = [("Baked + screen space (game's default)", "TextureAO_SSAO"),
             ("Baked only", "TextureAO"), ("Screen space only", "SSAO"), ("Off", "Off")]
 AA_METHODS = [("Temporal (TAA, game's default)", "TAA"), ("Off", "Off")]
 ANISOTROPY = [("Game's default", ""), ("16×", "16")]
+# How far the engine keeps its vegetation and props detailed (r_virtualGeometryScaleMultiplier;
+# 2026-10-20: 2x shows visibly denser ferns and plants in the middle distance, ~2% slower on the
+# forest route).
+DETAIL_DISTANCE = [("Console (1×)", "1"), ("High (1.5×)", "1.5"), ("Maximum (2×)", "2")]
+PARTICLES = [("Dynamic (game's default)", "Dynamic"), ("High", "High")]
+# The graphics presets: the settings they set (the effects, a matter of taste, and the texture
+# size, a matter of video memory, are left as they are). "Console" is the game on a PS4 Pro.
+GRAPHICS_PRESETS = {
+    "console": {"sun_shadows": True, "shadow_detail": "2", "ao_mode": "TextureAO_SSAO",
+                "aa_method": "TAA", "anisotropy": "", "detail_distance": "1",
+                "particles": "Dynamic"},
+    "high": {"sun_shadows": True, "shadow_detail": "3", "ao_mode": "TextureAO_SSAO",
+             "aa_method": "TAA", "anisotropy": "16", "detail_distance": "1.5",
+             "particles": "High"},
+    "max": {"sun_shadows": True, "shadow_detail": "3", "ao_mode": "TextureAO_SSAO",
+            "aa_method": "TAA", "anisotropy": "16", "detail_distance": "2", "particles": "High"},
+}
+PRESET_CHOICES = [("Console (PS4 Pro)", "console"), ("High", "high"), ("Maximum", "max"),
+                  ("Custom", "custom")]
+# The settings "Restore defaults" leaves alone: where things are and the languages.
+KEEP_ON_RESET = ("game_dir", "data_dir", "executable", "ui_language", "game_language")
 TEXTURE_REDUCE = [("Automatic (full above 6 GB of VRAM)", ""), ("Full", "0"),
                   ("Reduced from 2048×2048", "2048"), ("Reduced from 1024×1024", "1024")]
 LOG_LEVELS = [("info", "info"), ("warning", "warning"), ("debug", "debug"), ("trace", "trace")]
@@ -106,6 +128,8 @@ DEFAULTS = {
     "film_grain": True,
     "vignette": True,
     "anisotropy": "",
+    "detail_distance": "1",
+    "particles": "Dynamic",
     "texture_reduce": "",
     # Performance
     "async_shaders": True,
@@ -255,6 +279,10 @@ def game_convars(s):
         args.append("+r_vignetteScale=0")
     if s["anisotropy"]:
         args.append(f"+linearSamplerAnisoLevel={s['anisotropy']}")
+    if s["detail_distance"] != "1":
+        args.append(f"+r_virtualGeometryScaleMultiplier={s['detail_distance']}")
+    if s["particles"] != "Dynamic":
+        args.append(f"+particleResolution={s['particles']}")
     return args
 
 
@@ -327,8 +355,11 @@ class LauncherWindow(QMainWindow):
         font.setBold(True)
         self.play_button.setFont(font)
         self.play_button.clicked.connect(self.on_play)
+        reset = QPushButton(tr("Restore defaults"))
+        reset.clicked.connect(self.on_restore_defaults)
         bottom = QHBoxLayout()
         bottom.addWidget(self.status, 1)
+        bottom.addWidget(reset)
         bottom.addWidget(self.play_button)
 
         central = QWidget()
@@ -336,6 +367,17 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(self.tabs, 1)
         layout.addLayout(bottom)
         self.setCentralWidget(central)
+
+        # The widget of each plain setting (presets and "Restore defaults" set them).
+        self.widgets = {key: getattr(self, key) for key in DEFAULTS
+                        if key not in ("game_dir", "data_dir", "executable", "display",
+                                       "extra_env", "extra_args")}
+        for key in GRAPHICS_PRESETS["console"]:
+            widget = self.widgets[key]
+            signal = widget.toggled if isinstance(widget, QCheckBox) else \
+                widget.currentIndexChanged
+            signal.connect(self.update_preset)
+        self.update_preset()
         self.update_state()
 
     # ---- Pages ----
@@ -434,6 +476,11 @@ class LauncherWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(note(tr("Settings of the game's own engine, given to it at start.")))
+        presets = QFormLayout()
+        self.preset = combo(PRESET_CHOICES, "custom")
+        self.preset.activated.connect(self.on_preset)
+        presets.addRow(tr("Preset"), self.preset)
+        layout.addLayout(presets)
 
         shadows = QGroupBox(tr("Shadows"))
         form = QFormLayout(shadows)
@@ -455,8 +502,13 @@ class LauncherWindow(QMainWindow):
         self.vignette = self.check(form, "Vignette", "vignette")
         layout.addWidget(effects)
 
-        textures = QGroupBox(tr("Textures"))
+        textures = QGroupBox(tr("Detail and textures"))
         form = QFormLayout(textures)
+        self.detail_distance = combo(DETAIL_DISTANCE, self.settings["detail_distance"])
+        form.addRow(tr("Distant detail"), self.detail_distance)
+        form.addRow("", note(tr("How far vegetation and props keep their detail.")))
+        self.particles = combo(PARTICLES, self.settings["particles"])
+        form.addRow(tr("Particles"), self.particles)
         self.anisotropy = combo(ANISOTROPY, self.settings["anisotropy"])
         form.addRow(tr("Anisotropic filtering"), self.anisotropy)
         self.texture_reduce = combo(TEXTURE_REDUCE, self.settings["texture_reduce"])
@@ -615,6 +667,8 @@ class LauncherWindow(QMainWindow):
         s["film_grain"] = self.film_grain.isChecked()
         s["vignette"] = self.vignette.isChecked()
         s["anisotropy"] = self.anisotropy.currentData()
+        s["detail_distance"] = self.detail_distance.currentData()
+        s["particles"] = self.particles.currentData()
         s["texture_reduce"] = self.texture_reduce.currentData()
         s["async_shaders"] = self.async_shaders.isChecked()
         s["draw_pipe"] = self.draw_pipe.isChecked()
@@ -653,6 +707,44 @@ class LauncherWindow(QMainWindow):
             else:
                 self.status.setText(tr("Ready"))
             self.play_button.setEnabled(not problem and executable is not None)
+
+    @staticmethod
+    def set_widget(widget, value):
+        if isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        elif isinstance(widget, QSpinBox):
+            widget.setValue(int(value))
+        elif isinstance(widget, QComboBox):
+            index = widget.findData(value)
+            widget.setCurrentIndex(max(index, 0))
+
+    def update_preset(self):
+        """Shows the preset the graphics settings match, or "Custom"."""
+        s = self.store()
+        match = next((name for name, values in GRAPHICS_PRESETS.items()
+                      if all(s[key] == value for key, value in values.items())), "custom")
+        self.preset.setCurrentIndex(self.preset.findData(match))
+
+    def on_preset(self, _index):
+        name = self.preset.currentData()
+        for key, value in GRAPHICS_PRESETS.get(name, {}).items():
+            self.set_widget(self.widgets[key], value)
+        self.update_preset()
+
+    def on_restore_defaults(self):
+        answer = QMessageBox.question(
+            self, tr("Restore defaults"),
+            tr("Set every option back to its default? The folders and the languages stay."))
+        if answer != QMessageBox.Yes:
+            return
+        for key, widget in self.widgets.items():
+            if key not in KEEP_ON_RESET:
+                self.set_widget(widget, DEFAULTS[key])
+        self.display.setCurrentIndex(0)
+        self.extra_env.setText("")
+        self.extra_args.setText("")
+        self.update_preset()
+        self.update_state()
 
     def data_path(self):
         return Path(self.data_dir.text().strip() or DEFAULT_DATA_DIR).expanduser()

@@ -67,9 +67,11 @@ the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Deb
   mode), PS4 Pro mode, the frame rate limit and the game's resolution: by default the monitor's
   own (the game draws and outputs at it, no upscaling; on a PS4 Pro it drew at 1600x900 or
   2560x1440 and enlarged that to 1080p or 4K).
-- **Graphics:** the game engine's own settings (sun shadows and their detail, ambient occlusion,
-  anti-aliasing, motion blur, depth of field, bloom, film grain, vignette, anisotropic filtering),
+- **Graphics:** presets (Console, High, Maximum) and the game engine's own settings (sun shadows
+  and their detail, ambient occlusion, anti-aliasing, motion blur, depth of field, bloom, film
+  grain, vignette, distant detail of vegetation and props, particles, anisotropic filtering),
   given to the engine as console variables on its command line, plus the texture size in VRAM.
+  "Restore defaults" sets everything back (folders and languages stay).
 - **Game language:** menus and subtitles, by default the system's (Brazilian Portuguese, US
   English, Canadian French and Latin American Spanish too, which the European dump hides).
 - **Performance, controls (`controls.ini`), advanced** (extra variables and engine arguments).
