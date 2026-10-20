@@ -109,6 +109,7 @@ mode, played through the whole game on 2026-10-13). `SOTC_FPS_LIMIT` and `SOTC_U
 | `SOTC_RENDERDOC=""` | Loads RenderDoc; F10 captures the frame. Needs `SDL_VIDEO_DRIVER=x11` (RenderDoc does not support Wayland). X11 is slower; use it only for captures. |
 | `SOTC_DUMP_SHADERS=1` | Writes each shader's GCN, IR and SPIR-V to `gpu/shader/dumps`. Use with `SOTC_NO_SHADER_CACHE=1`, or shaders already in the cache are not translated again. |
 | `SOTC_NO_SHADER_CACHE=1` | Ignores the on-disk shader cache. |
+| `SOTC_SHADER_CACHE_DIR=<folder>` | Keeps the shader cache in that folder instead of `gpu/cache`. For test builds: each build version keeps one cache and removes the others in its folder, so a test build sharing the player's folder would throw the player's cache away. |
 | `SOTC_WATCH_COPIES=1` | Counts the game's memory copies by memory type and call site (log, every 10 s). Slows the game down; short measurements only. |
 | `SOTC_PACKET_STATS=1` | Statistics of the GPU command packets the game sends. |
 | `SOTC_SRT_FETCH_PAGES=1` | The shader resource walker downloads whole pages the GPU wrote, instead of exact bytes (rules out reads the byte check would miss). |

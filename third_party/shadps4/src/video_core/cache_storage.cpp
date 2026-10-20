@@ -16,6 +16,7 @@
 #include <miniz.h>
 
 #include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -99,10 +100,19 @@ void DataBase::Open() {
     // (SOTC_SHADER_CACHE_VERSION, third_party/shader_cache_version.cmake): changing them starts
     // a new cache, and the caches of older versions are removed.
     const std::string cache_name = std::string{"sotcport-"} + SOTC_SHADER_CACHE_VERSION;
+    // sotcport: SOTC_SHADER_CACHE_DIR=<folder> keeps the cache there instead of in the GPU
+    // layer's folder: a test build (another cache version) would otherwise remove the player's
+    // cache on every run, and the player's build the test build's in turn.
+    std::filesystem::path base_dir = Common::FS::GetUserPath(Common::FS::PathType::CacheDir);
+    if (const char* dir = std::getenv("SOTC_SHADER_CACHE_DIR"); dir && *dir) {
+        base_dir = dir;
+        std::error_code error;
+        std::filesystem::create_directories(base_dir, error);
+        LOG_INFO(Render, "Shader cache in {}", base_dir.string());
+    }
     {
         std::error_code error;
-        const auto dir = Common::FS::GetUserPath(Common::FS::PathType::CacheDir);
-        for (const auto& entry : std::filesystem::directory_iterator{dir, error}) {
+        for (const auto& entry : std::filesystem::directory_iterator{base_dir, error}) {
             const auto name = entry.path().filename().string();
             if (name.starts_with("sotcport-") && entry.path().stem().string() != cache_name) {
                 std::filesystem::remove_all(entry.path(), error);
@@ -114,8 +124,7 @@ void DataBase::Open() {
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_zero_struct(&zip_ar);
 
-        cache_path = GetUserPath(PathType::CacheDir) /
-                     std::filesystem::path{cache_name}.replace_extension(".zip");
+        cache_path = base_dir / std::filesystem::path{cache_name}.replace_extension(".zip");
 
         if (!mz_zip_reader_init_file(&zip_ar, cache_path.string().c_str(),
                                      MZ_ZIP_FLAG_READ_ALLOW_WRITING) ||
@@ -126,7 +135,7 @@ void DataBase::Open() {
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
         }
     } else {
-        cache_path = GetUserPath(PathType::CacheDir) / cache_name;
+        cache_path = base_dir / cache_name;
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
