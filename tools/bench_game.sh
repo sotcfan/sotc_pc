@@ -88,6 +88,10 @@ fi
 # readbacks (OPTIONS.md), uncapped unless SOTC_FPS_LIMIT is given. Set any of them in the
 # environment to run otherwise.
 export SOTC_DRAW_PIPE=${SOTC_DRAW_PIPE-1} SOTC_ASYNC_READBACK=${SOTC_ASYNC_READBACK-1}
+# GPU timestamps around every command buffer (OPTIONS.md): the summary gives how busy the GPU
+# was, the measure of the native renderer scope (2026-10-20: the GPU at 100%). No FPS cost
+# measured (95.3 FPS with and without on the forest route).
+export SOTC_GPU_TIMING=${SOTC_GPU_TIMING-1}
 if [ -z "${SOTC_FPS_LIMIT:-}" ]; then
     export SOTC_UNCAPPED=${SOTC_UNCAPPED-1}
 fi
@@ -174,4 +178,24 @@ slow = sum(1 for t in frametimes if t > 16.7) / len(frametimes) * 100
 print(f"fps {lo:.0f}-{hi:.0f} s: mean {sum(fps) / len(fps):.1f}  min {fps[0]:.1f}  "
       f"worst 5% frame time {worst(0.05):.1f} ms  worst 1% {worst(0.01):.1f} ms  "
       f"frames over 16.7 ms {slow:.1f}%")
+# GPU busy time from SOTC_GPU_TIMING: each scheduler (the game's command buffers, presentation)
+# logs "GPU timing: busy <x> ms/s" every 5 s, a few ms apart; the reports of one period are
+# summed, the periods inside the window averaged. The log's clock starts with the game, close
+# enough to MangoHud's.
+import re
+reports = []
+for line in open(sys.argv[1] + "/log.txt", errors="replace"):
+    m = re.match(r"\[\s*([\d.]+)\].*GPU timing: busy ([\d.]+) ms/s", line)
+    if m and lo <= float(m[1]) <= hi:
+        reports.append((float(m[1]), float(m[2])))
+periods = []
+for t, busy in sorted(reports):
+    if periods and t - periods[-1][0] < 1.0:
+        periods[-1][1] += busy
+    else:
+        periods.append([t, busy])
+if periods:
+    busy = sum(p[1] for p in periods) / len(periods)
+    print(f"GPU busy {lo:.0f}-{hi:.0f} s: {busy:.0f} ms/s ({busy / 10:.0f}%), "
+          f"{busy / (sum(fps) / len(fps)):.2f} ms per frame")
 PY
