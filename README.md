@@ -56,6 +56,22 @@ GPU command thread about 10% faster.
 
 Saves and settings go to `~/.local/share/sotcport` (`--data <folder>` changes it).
 
+### Launcher
+
+`launcher/sotcport-launcher.sh` opens a window that picks your dump, sets the options and starts
+the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Debian/Ubuntu:
+`apt install python3-pyside6.qtwidgets`; elsewhere `pip install PySide6`);
+`launcher/install-desktop.sh` adds it to the application menu.
+
+- **Display:** fullscreen (borderless, Alt+Enter toggles it), monitor, window size, VSync (present
+  mode), PS4 Pro mode and the frame rate limit.
+- **Graphics:** the game engine's own settings (sun shadows and their detail, ambient occlusion,
+  anti-aliasing, motion blur, depth of field, bloom, film grain, vignette, anisotropic filtering),
+  given to the engine as console variables on its command line, plus the texture size in VRAM.
+- **Performance, controls (`controls.ini`), advanced** (extra variables and engine arguments).
+
+Its settings are kept in `~/.config/sotcport-launcher/settings.json`.
+
 ## Building and running on Windows
 
 The game calls sotcport's functions with the System V calling convention, which only clang
@@ -127,10 +143,12 @@ unlocks it, in `trophies.txt` in the data folder (trophy id, date and time; 38 t
 platinum, given with the last of the others). Their names are encrypted in the game's files; the
 icons in `sce_sys/trophy/trophy00.trp` (`TROP000.PNG`...) match the ids.
 
-Environment variables (frame limiter, performance switches, diagnostics): see
-[OPTIONS.md](OPTIONS.md). For play, `SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1` is a good start: a
-steady 30 FPS. `SOTC_FPS_LIMIT=60` is still experimental: the GPU layer does not always keep up, and
-some of the game's logic breaks at 60 (see OPTIONS.md, "Frame rate").
+Environment variables (display, frame limiter, performance switches, diagnostics) and the
+engine's console variables: see [OPTIONS.md](OPTIONS.md); the launcher sets them for you. Without
+it, `SOTC_NEO_MODE=1 SOTC_FPS_LIMIT=60 SOTC_DRAW_PIPE=1 SOTC_ASYNC_READBACK=1 SOTC_ASYNC_SHADERS=1`
+is the launcher's default: the PS4 Pro mode at 60 FPS. Without `SOTC_NEO_MODE=1` keep
+`SOTC_FPS_LIMIT=30`: some of the game's logic breaks above 30 on an original PS4 (see OPTIONS.md,
+"Frame rate").
 
 ## Layout
 
@@ -144,6 +162,7 @@ some of the game's logic breaks at 60 (see OPTIONS.md, "Frame rate").
 | `third_party/shadps4/` | shadPS4's video core and shader recompiler, modified (changes marked `sotcport:`) |
 | `third_party/externals/` | libraries built with the project (see [THIRD_PARTY.md](THIRD_PARTY.md)) |
 | `tools/` | benchmark, PGO training, import listing |
+| `launcher/` | the launcher (Python, Qt/PySide6) |
 
 ## Legal
 
@@ -160,7 +179,8 @@ keep their own licenses, listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 ## Credits
 
 - [shadPS4](https://github.com/shadps4-emu/shadPS4): the video core and shader recompiler.
-- bbport (the native Bloodborne port): the design this project shares and several of its GPU
-  layer optimizations; its Windows fork by Supermedo: the Windows memory and TLS approach.
+- bbport (the native Bloodborne port): the design this project shares, several of its GPU
+  layer optimizations and the layout of its launcher; its Windows fork by Supermedo: the Windows
+  memory and TLS approach.
 - [vgmstream](https://github.com/vgmstream/vgmstream): the HEVAG coefficient table.
 - [LibAtrac9](https://github.com/Thealexbarney/LibAtrac9): the ATRAC9 decoder.

@@ -75,14 +75,78 @@ const auto g_start = std::chrono::steady_clock::now();
 
 namespace Frontend {
 
+namespace {
+
+// sotcport: the monitor named by SOTC_DISPLAY (OPTIONS.md): its number in `sotcport
+// --list-displays` (1 = the first) or its name, as the launcher passes it. 0 when unset or not
+// found (the window system then places the window).
+SDL_DisplayID ChosenDisplay() {
+    const char* wanted = std::getenv("SOTC_DISPLAY");
+    if (!wanted || !*wanted) {
+        return 0;
+    }
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    SDL_DisplayID chosen = 0;
+    char* end = nullptr;
+    const long number = std::strtol(wanted, &end, 10);
+    for (int i = 0; i < count && !chosen; i++) {
+        const char* name = SDL_GetDisplayName(displays[i]);
+        if ((*end == '\0' && number == i + 1) || (name && std::strcmp(name, wanted) == 0)) {
+            chosen = displays[i];
+        }
+    }
+    SDL_free(displays);
+    if (!chosen) {
+        LOG_WARNING(Frontend, "SOTC_DISPLAY={}: no such monitor (sotcport --list-displays)", wanted);
+    }
+    return chosen;
+}
+
+} // namespace
+
 WindowSDL::WindowSDL(s32 width_, s32 height_, std::string_view title)
     : width{width_}, height{height_} {
     const std::string name(title);
-    window = SDL_CreateWindow(name.c_str(), width, height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    // sotcport: the launcher's display settings (OPTIONS.md). SOTC_WINDOW_SIZE=<w>x<h> sizes the
+    // window, SOTC_DISPLAY puts it on a monitor and SOTC_FULLSCREEN=1 makes it fill that monitor
+    // (borderless: the desktop's own mode, no mode switch; Alt+Enter toggles it while playing).
+    if (const char* size = std::getenv("SOTC_WINDOW_SIZE")) {
+        int w = 0, h = 0;
+        if (std::sscanf(size, "%dx%d", &w, &h) == 2 && w >= 320 && h >= 200) {
+            width = w;
+            height = h;
+        }
+    }
+    const SDL_DisplayID display = ChosenDisplay();
+    const char* fullscreen_env = std::getenv("SOTC_FULLSCREEN");
+    const bool fullscreen = fullscreen_env && std::strcmp(fullscreen_env, "0") != 0;
+    const SDL_PropertiesID create = SDL_CreateProperties();
+    SDL_SetStringProperty(create, SDL_PROP_WINDOW_CREATE_TITLE_STRING, name.c_str());
+    SDL_SetNumberProperty(create, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
+    SDL_SetNumberProperty(create, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height);
+    if (display) {
+        // Wayland ignores positions, but SDL still uses the display a position falls on to pick
+        // the output a fullscreen window goes to.
+        SDL_SetNumberProperty(create, SDL_PROP_WINDOW_CREATE_X_NUMBER,
+                              SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+        SDL_SetNumberProperty(create, SDL_PROP_WINDOW_CREATE_Y_NUMBER,
+                              SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+    }
+    SDL_SetBooleanProperty(create, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+    SDL_SetBooleanProperty(create, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
+    SDL_SetBooleanProperty(create, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, fullscreen);
+    window = SDL_CreateWindowWithProperties(create);
+    SDL_DestroyProperties(create);
     if (!window) {
         LOG_CRITICAL(Frontend, "could not create the window: {}", SDL_GetError());
         return;
     }
+    if (fullscreen) {
+        SDL_GetWindowSizeInPixels(window, &width, &height);
+    }
+    LOG_INFO(Frontend, "window {}x{}{}{}", width, height, fullscreen ? ", fullscreen" : "",
+             display ? fmt::format(" on {}", SDL_GetDisplayName(display)) : std::string{});
     const SDL_PropertiesID props = SDL_GetWindowProperties(window);
     if (std::strcmp(SDL_GetCurrentVideoDriver(), "x11") == 0) {
         info.type = WindowSystemType::X11;
@@ -110,6 +174,19 @@ bool WindowSDL::ProcessEvents(int timeout_ms) {
         return true;
     }
     do {
+        // sotcport: Alt+Enter toggles fullscreen (borderless) and does not reach the game (Enter
+        // is a button there).
+        if ((event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) &&
+            (event.key.scancode == SDL_SCANCODE_RETURN ||
+             event.key.scancode == SDL_SCANCODE_KP_ENTER) &&
+            (event.key.mod & SDL_KMOD_ALT)) {
+            if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+                const bool now = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0;
+                SDL_SetWindowFullscreen(window, now);
+                LOG_INFO(Frontend, "fullscreen {} (Alt+Enter)", now ? "on" : "off");
+            }
+            continue;
+        }
         input::HandleEvent(event);
         switch (event.type) {
         case SDL_EVENT_QUIT:
@@ -914,6 +991,26 @@ void FinishScreenshots() {
     if (!Vulkan::WaitForScreenshots(std::chrono::seconds{5})) {
         LOG_WARNING(Render_Vulkan, "exiting with screenshots not saved yet");
     }
+}
+
+int PrintDisplays() {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+    for (int i = 0; i < count; i++) {
+        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(displays[i]);
+        const char* name = SDL_GetDisplayName(displays[i]);
+        std::printf("%d\t%s\t%dx%d\t%.0f\t%d\n", i + 1, name ? name : "?", mode ? mode->w : 0,
+                    mode ? mode->h : 0, mode ? mode->refresh_rate : 0.0f,
+                    displays[i] == primary ? 1 : 0);
+    }
+    SDL_free(displays);
+    SDL_Quit();
+    return 0;
 }
 
 bool ProcessEvents(int timeout_ms) {

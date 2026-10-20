@@ -53,6 +53,8 @@ Options:
                        (default: ~/.local/share/sotcport)
   --dump-after <s>     after s seconds, every game thread shows where it is
                        (kill -USR1 <pid> does the same at any time)
+  --list-displays      lists the monitors (number, name, size, refresh rate, primary)
+                       and exits: the numbers SOTC_DISPLAY takes
 )";
 
 std::filesystem::path DefaultDataDir() {
@@ -127,6 +129,8 @@ int main(int argc, char** argv) {
                 return 2;
             }
             logging::SetLevel(level);
+        } else if (arg == "--list-displays") {
+            return gpu::PrintDisplays();
         } else if (arg == "-h" || arg == "--help") {
             std::fputs(Usage.data(), stdout);
             return 0;

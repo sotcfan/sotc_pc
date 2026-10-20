@@ -17,6 +17,11 @@ namespace gpu {
 // main thread, before the game is linked (the renderer must exist before the game maps memory).
 bool Initialize(int sdk_version);
 
+// `sotcport --list-displays`: one line per monitor, tab separated: its number (what SOTC_DISPLAY
+// takes, 1 = the first), name, desktop size (<w>x<h>), refresh rate in Hz and 1 for the primary
+// one. For the launcher. Returns the exit status.
+int PrintDisplays();
+
 // Handles window events for up to `timeout_ms`. Returns false once the window was closed.
 bool ProcessEvents(int timeout_ms);
 

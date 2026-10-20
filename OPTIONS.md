@@ -29,6 +29,8 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `--data <folder>` | Where saves and the game's writable data live (default `~/.local/share/sotcport`). |
 | `--trace <file>` | Records, in order, the first call to each Sony function the game imports. |
 | `--dump-after <s>` | After `s` seconds every game thread prints where it is (`kill -USR1 <pid>` does the same at any time). |
+| `--list-displays` | Lists the monitors, one per line, tab separated: number (what `SOTC_DISPLAY` takes), name, desktop size, refresh rate, 1 for the primary one. Then exits. |
+| `-- +<ConVar>=<value> ...` | Everything after `--` is the game's own command line. The engine reads its console variables (ConVars) from it: `+r_motionBlurEnable=0`, `+r_dofEnable=0`, `+linearSamplerAnisoLevel=16`... `+help` writes every command and ConVar with its current value to the log. The launcher sets its graphics options this way. |
 
 ## Building
 
@@ -37,6 +39,15 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `-DSOTC_LTO=ON` | Link-time optimization (ThinLTO; needs clang). |
 | `-DSOTC_PGO=generate` | Instrumented build that records a profile while the game runs (`tools/pgo_train.sh`). |
 | `-DSOTC_PGO=use` | Optimizes with the recorded profile. Retrain after big changes to the GPU layer; the final build needs `--clean-first`. |
+
+## Display
+
+| Variable | What it does |
+|---|---|
+| `SOTC_FULLSCREEN=1` | Fills the monitor (borderless, at the desktop's own resolution: no mode switch). Alt+Enter toggles it while playing. |
+| `SOTC_DISPLAY=<n or name>` | The monitor the window (or fullscreen) goes to: its number in `--list-displays` (1 = the first) or its name. |
+| `SOTC_WINDOW_SIZE=<w>x<h>` | The window's size (default 1280x720). |
+| `SOTC_PRESENT_MODE=<mode>` | How frames reach the screen: `Mailbox` (default: no tearing, no waiting), `Fifo` (VSync: waits for the monitor's refresh), `FifoRelaxed` (VSync that tears when a frame is late), `Immediate` (no waiting, tears). |
 
 ## Frame rate
 
@@ -48,8 +59,8 @@ mode, played through the whole game on 2026-10-13). `SOTC_FPS_LIMIT` and `SOTC_U
 - The game moved its physics (Wander's cape, Agro) by a fixed 1/60 s per frame while the world moved
   by the measured frame time, so only a steady 30 or 60 behaved: at other rates, or with an uneven
   frame time, the cape whipped around and Agro overshot. sotcport now gives the physics the frame's
-  step, and smooths that step (`src/game/frame_step.cpp`), so any frame rate should behave
-  (2026-10-19; being checked in play).
+  step, and smooths that step (`src/game/frame_step.cpp`), so any frame rate behaves (2026-10-19;
+  checked in play on horseback, 2026-10-20).
 
 | Variable | What it does |
 |---|---|

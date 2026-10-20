@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -194,11 +195,17 @@ void Swapchain::FindPresentMode() {
         return;
     }
 
-    const auto requested_mode = EmulatorSettings.GetPresentMode();
+    // sotcport: SOTC_PRESENT_MODE (OPTIONS.md, the launcher's VSync setting) picks the mode;
+    // read here rather than in the settings shim, whose file the shader cache version hashes.
+    const char* env_mode = std::getenv("SOTC_PRESENT_MODE");
+    const std::string requested_mode =
+        env_mode && *env_mode ? std::string{env_mode} : EmulatorSettings.GetPresentMode();
     if (requested_mode == "Mailbox") {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
         present_mode = vk::PresentModeKHR::eFifo;
+    } else if (requested_mode == "FifoRelaxed") {
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
     } else {

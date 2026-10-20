@@ -102,6 +102,8 @@ shots=${SOTC_BENCH_SHOTS:-$shots}
 # save load on (the keys above still go through the menus; leave SOTC_BENCH_ROUTE unset);
 # SOTC_BENCH_DURATION=<s> and SOTC_BENCH_WINDOW=<from>-<to> change how long it runs and which
 # seconds are measured.
+# SOTC_BENCH_GAME_ARGS="<args>" passes them to the game as its command line (after "--"), for
+# example the engine's console variables: "+r_enableCascadeShadows=0".
 # SOTC_BENCH_KEYS=<script> adds keys to the script (for example "75:F7" for the diagnostic
 # sequence, src/input/input.cpp).
 keys="$keys${SOTC_BENCH_KEYS:+,$SOTC_BENCH_KEYS}"
@@ -155,7 +157,7 @@ cd "$root"
 SOTC_KEY_SCRIPT="$keys" SOTC_SCREENSHOTS="$shots" MANGOHUD_CONFIGFILE=$conf \
     systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 \
     timeout $duration mangohud "./${SOTC_BUILD:-build-clang}/sotcport" "$SOTC_GAME" --data "$data" \
-    > "$out/log.txt" 2>&1 || true
+    ${SOTC_BENCH_GAME_ARGS:+-- $SOTC_BENCH_GAME_ARGS} > "$out/log.txt" 2>&1 || true
 wait
 
 i=0

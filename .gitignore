@@ -5,3 +5,4 @@
 trace*.txt
 compile_commands.json
 /.vscode/
+__pycache__/
