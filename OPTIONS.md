@@ -48,6 +48,7 @@ SOTC_FPS_LIMIT=30 SOTC_DRAW_PIPE=1 \
 | `SOTC_DISPLAY=<n or name>` | The monitor the window (or fullscreen) goes to: its number in `--list-displays` (1 = the first) or its name. |
 | `SOTC_WINDOW_SIZE=<w>x<h>` | The window's size (default 1280x720). |
 | `SOTC_RESOLUTION=<w>x<h>` | With `SOTC_NEO_MODE=1`: the game renders its 3D scene and outputs at that size, with no upscaling (its PS4 Pro 4K mode, resized: `src/game/render_resolution.cpp`). The game's camera is 16:9, so other aspect ratios come out stretched; above 2560x1440 the game's render target pool grows with the pixels (3840x2160: 1.3 GB instead of 573 MB). Forest route, uncapped, 7900 XT: 2560x1440 87 FPS, 3840x2160 69 FPS. The launcher's "Native" picks the monitor's. |
+| `SOTC_RENDER_RESOLUTION=<w>x<h>` | With `SOTC_RESOLUTION`: the 3D scene at this size instead of the output's, enlarged by the game's own final pass (a plain filter) or, later, by FSR. Default: the output's (native). |
 | `SOTC_VIDEO_OUT=<w>x<h>` | The TV the game is told it is connected to (default 1280x720). With `SOTC_NEO_MODE=1` and `3840x2160` the game offers its PS4 Pro 4K mode (Options, or `+r_Wants4K=WantsHigh`): the 3D scene at 2560x1440 instead of 1600x900, output at 3840x2160 (fitted to the window). The launcher sets it in PS4 Pro mode. |
 | `SOTC_PRESENT_MODE=<mode>` | How frames reach the screen: `Mailbox` (default: no tearing, no waiting), `Fifo` (VSync: waits for the monitor's refresh), `FifoRelaxed` (VSync that tears when a frame is late), `Immediate` (no waiting, tears). |
 

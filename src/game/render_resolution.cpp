@@ -91,6 +91,7 @@ struct SizeImmediate {
     u8 length;      // of the instruction; the immediate is its last four bytes
     u8 original[6];
     bool width;     // else the height
+    bool scene;     // the 3D scene's size, else the output's (the screen the game draws on)
 };
 // The render target pool's size in Pro mode (see above).
 constexpr u64 TargetPoolAddress = 0x49b760;
@@ -98,16 +99,16 @@ constexpr u8 TargetPoolOriginal[5] = {0xb8, 0x00, 0x00, 0xd1, 0x23}; // mov eax,
 constexpr u64 TargetPoolSize = 0x23d10000;
 
 constexpr SizeImmediate SizeImmediates[] = {
-    {0x495bf1, 6, {0x41, 0xbf, 0x70, 0x08, 0x00, 0x00}, false},
-    {0x495bfc, 6, {0x41, 0xbc, 0x00, 0x0f, 0x00, 0x00}, true},
-    {0x495d5b, 6, {0x41, 0xbd, 0x00, 0x0a, 0x00, 0x00}, true},
-    {0x495d76, 6, {0x41, 0xbf, 0xa0, 0x05, 0x00, 0x00}, false},
+    {0x495bf1, 6, {0x41, 0xbf, 0x70, 0x08, 0x00, 0x00}, false, false},
+    {0x495bfc, 6, {0x41, 0xbc, 0x00, 0x0f, 0x00, 0x00}, true, false},
+    {0x495d5b, 6, {0x41, 0xbd, 0x00, 0x0a, 0x00, 0x00}, true, true},
+    {0x495d76, 6, {0x41, 0xbf, 0xa0, 0x05, 0x00, 0x00}, false, true},
     // The screen size the rest of the game asks for in the 4K mode.
-    {0x4a2ae4, 5, {0xb8, 0x00, 0x0f, 0x00, 0x00}, true},  // mov eax, 0xf00
-    {0x4a2b08, 5, {0xb8, 0x70, 0x08, 0x00, 0x00}, false}, // mov eax, 0x870
-    {0x56f2e7, 5, {0xb9, 0x00, 0x0f, 0x00, 0x00}, true},  // mov ecx, 0xf00
-    {0x56f307, 5, {0xb9, 0x70, 0x08, 0x00, 0x00}, false}, // mov ecx, 0x870
-    {0x575c58, 5, {0xb9, 0x70, 0x08, 0x00, 0x00}, false}, // mov ecx, 0x870
+    {0x4a2ae4, 5, {0xb8, 0x00, 0x0f, 0x00, 0x00}, true, false},  // mov eax, 0xf00
+    {0x4a2b08, 5, {0xb8, 0x70, 0x08, 0x00, 0x00}, false, false}, // mov eax, 0x870
+    {0x56f2e7, 5, {0xb9, 0x00, 0x0f, 0x00, 0x00}, true, false},  // mov ecx, 0xf00
+    {0x56f307, 5, {0xb9, 0x70, 0x08, 0x00, 0x00}, false, false}, // mov ecx, 0x870
+    {0x575c58, 5, {0xb9, 0x70, 0x08, 0x00, 0x00}, false, false}, // mov ecx, 0x870
 };
 
 // The float tables of the screen size per mode (see above): where they start and how many
@@ -172,7 +173,7 @@ bool EnvOn(const char* name) {
 
 // Rewrites the 4K mode's scene and output sizes, after checking every instruction is the one the
 // game ships (another version of the executable is left alone).
-bool PatchSizes(u32 width, u32 height) {
+bool PatchSizes(u32 width, u32 height, u32 scene_width, u32 scene_height) {
     for (const auto& immediate : SizeImmediates) {
         if (std::memcmp(reinterpret_cast<const void*>(immediate.address), immediate.original,
                         immediate.length) != 0) {
@@ -205,7 +206,7 @@ bool PatchSizes(u32 width, u32 height) {
         }
     }
     // A scene larger than the game's own 2560x1440 needs a larger render target pool.
-    const u64 pixels = u64{width} * height;
+    const u64 pixels = u64{scene_width} * scene_height;
     const u64 game_pixels = 2560 * 1440;
     if (pixels > game_pixels) {
         if (std::memcmp(reinterpret_cast<const void*>(TargetPoolAddress), TargetPoolOriginal,
@@ -217,7 +218,8 @@ bool PatchSizes(u32 width, u32 height) {
         // Rounded up to the pool's 64 KiB alignment.
         const u64 pool = (TargetPoolSize * pixels / game_pixels + 0xffff) & ~u64{0xffff};
         if (pool > 0xffffffffu) {
-            LOG_ERROR("Resolution", "{}x{} needs a render target pool over 4 GiB", width, height);
+            LOG_ERROR("Resolution", "{}x{} needs a render target pool over 4 GiB", scene_width,
+                      scene_height);
             return false;
         }
         const u32 pool32 = static_cast<u32>(pool);
@@ -226,7 +228,8 @@ bool PatchSizes(u32 width, u32 height) {
                  TargetPoolSize >> 20);
     }
     for (const auto& immediate : SizeImmediates) {
-        const u32 value = immediate.width ? width : height;
+        const u32 value = immediate.scene ? (immediate.width ? scene_width : scene_height)
+                                          : (immediate.width ? width : height);
         std::memcpy(reinterpret_cast<void*>(immediate.address + immediate.length - 4), &value,
                     sizeof(value));
     }
@@ -266,7 +269,20 @@ void InstallRenderResolution(std::vector<std::string>& game_args) {
                                 "4K mode); the resolution stays the game's");
         return;
     }
-    if (!PatchSizes(width, height)) {
+    // SOTC_RENDER_RESOLUTION: the 3D scene at another size than the output, for an upscaler
+    // (FSR) to enlarge; by default the same (native).
+    u32 scene_width = width, scene_height = height;
+    if (const char* scene = std::getenv("SOTC_RENDER_RESOLUTION"); scene && *scene) {
+        u32 w = 0, h = 0;
+        if (std::sscanf(scene, "%ux%u", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 7680 &&
+            h <= 4320) {
+            scene_width = w & ~1u;
+            scene_height = h & ~1u;
+        } else {
+            LOG_ERROR("Resolution", "SOTC_RENDER_RESOLUTION={}: expected <width>x<height>", scene);
+        }
+    }
+    if (!PatchSizes(width, height, scene_width, scene_height)) {
         return;
     }
     // Ask for the 4K mode unless the game's command line already chooses one.
@@ -276,7 +292,8 @@ void InstallRenderResolution(std::vector<std::string>& game_args) {
     if (!chosen) {
         game_args.push_back("+r_Wants4K=WantsHigh");
     }
-    LOG_INFO("Resolution", "the game renders and outputs at {}x{} (its 4K mode{})", width, height,
+    LOG_INFO("Resolution", "the game renders at {}x{} and outputs at {}x{} (its 4K mode{})",
+             scene_width, scene_height, width, height,
              chosen ? ", if the command line's r_Wants4K picks it" : "");
 }
 
