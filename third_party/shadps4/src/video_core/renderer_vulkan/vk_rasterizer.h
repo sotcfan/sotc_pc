@@ -432,6 +432,7 @@ private:
     // sotcport (two-stage draw pipeline).
     std::unique_ptr<DrawPipe> draw_pipe;
     std::unique_ptr<FsrPass> fsr; // sotcport: SOTC_UPSCALER=fsr (vk_fsr.h)
+    bool fsr_display_target = false; ///< sotcport: this draw's color target 0 is the display buffer
     std::unique_ptr<StageState> pipe_state; ///< stage B's copy of the GPU state
     bool pipe_synced = false;               ///< pipe_state started from the live registers
     /// sotcport: the registers as stage B has them after the last packet (stage A's copy,

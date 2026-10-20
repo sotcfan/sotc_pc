@@ -139,9 +139,9 @@ bool FsrPass::IsScene(const VideoCore::Image& image) {
            image.info.pixel_format == vk::Format::eR16G16B16A16Sfloat;
 }
 
-bool FsrPass::IsOutputSized(const VideoCore::Image& image) {
-    return Enabled() && image.info.size.width == output_width &&
-           image.info.size.height == output_height;
+bool FsrPass::IsDisplayTarget(const VideoCore::Image& image) {
+    return Enabled() && image.info.tile_mode == AmdGpu::TileMode::Display2DThin &&
+           image.info.size.width == output_width && image.info.size.height == output_height;
 }
 
 bool FsrPass::ReplaceScene(VideoCore::ImageId scene_id, vk::ImageView& view,
@@ -220,6 +220,12 @@ bool FsrPass::ReplaceScene(VideoCore::ImageId scene_id, vk::ImageView& view,
         info.viewSpaceToMeters = 1.0f;
         info.sharpness = sharpness;
         info.enableSharpening = sharpness > 0.0f;
+        if (frame_id == 0) {
+            // Shows in the log that the final draw was found (FSR otherwise stays silent).
+            LOG_INFO(Render_Vulkan, "FSR: first frame upscaled (scene {}x{}, depth {}x{})",
+                     scene.info.size.width, scene.info.size.height, depth.info.size.width,
+                     depth.info.size.height);
+        }
         info.reset = frame_id == 0;
         info.frameId = ++frame_id;
 

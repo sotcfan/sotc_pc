@@ -337,6 +337,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    fsr_display_target = false;
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
@@ -355,6 +356,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             cb_descs[cb], [&] { std::construct_at(&desc, col_buf, hint); }));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        // sotcport: whether this draw writes the display buffer (FSR's final draw, BindTextures).
+        // Kept here: cb_descs keeps a slot's last target when a draw does not use the slot.
+        if (cb == 0 && fsr->Enabled()) {
+            fsr_display_target = fsr->IsDisplayTarget(image);
+        }
     }
 
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
@@ -2729,22 +2735,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         image_descriptor_array_sizes.push_back(num_bindings);
     }
 
-    // sotcport: FSR (vk_fsr.h). The game's final draw samples the post-processed scene (render
-    // size, RGBA16F) together with an output-size image (the interface): FSR's result is bound
-    // in place of the scene.
+    // sotcport: FSR (vk_fsr.h). The game's final draw is the pixel shader that draws into the
+    // display buffer (PrepareRenderState has found the draw's targets) and samples the
+    // post-processed scene (render size, RGBA16F): FSR's result is bound in place of the scene.
+    // Not "a draw sampling a render-size and an output-size image": with FSR as anti-aliasing
+    // only the two sizes are the same, and every scene pass matched (2026-10-20: the scene's
+    // textures replaced by FSR's image, a black sky, geometry smeared across it).
     bool fsr_final_draw = false;
-    if (fsr->Enabled()) {
-        bool samples_scene = false, samples_output = false;
+    if (stage.sw_stage == Shader::SwStage::Fragment && fsr_display_target) {
         for (u32 i = 0; i < num_images; ++i) {
             const auto& [image_id, desc] = image_bindings[i];
-            if (!image_id || desc.type == VideoCore::TextureCache::BindingType::Storage) {
-                continue;
+            if (image_id && desc.type != VideoCore::TextureCache::BindingType::Storage &&
+                fsr->IsScene(texture_cache.GetImage(image_id))) {
+                fsr_final_draw = true;
             }
-            const auto& bound = texture_cache.GetImage(image_id);
-            samples_scene |= fsr->IsScene(bound);
-            samples_output |= fsr->IsOutputSized(bound);
         }
-        fsr_final_draw = samples_scene && samples_output;
     }
 
     // Second pass to re-bind images that were updated after binding

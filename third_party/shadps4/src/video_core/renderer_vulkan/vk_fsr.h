@@ -58,8 +58,9 @@ public:
 
     /// Whether `image` is the post-processed scene (render size, RGBA16F).
     [[nodiscard]] bool IsScene(const VideoCore::Image& image);
-    /// Whether `image` has the output size (the interface the final draw also samples).
-    [[nodiscard]] bool IsOutputSized(const VideoCore::Image& image);
+    /// Whether `image`, a draw's first color target, is a display buffer of the output size (the
+    /// game's final draw writes the frame there: tiled for display, which no scene target is).
+    [[nodiscard]] bool IsDisplayTarget(const VideoCore::Image& image);
 
     /// The final draw samples `scene`: records FSR (once per frame, before the draw's render
     /// pass) and gives the view and layout of its result to bind instead. False if FSR could not
