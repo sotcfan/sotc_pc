@@ -36,6 +36,10 @@
 //                    and takes 12 screenshots, with
 //                    "DIAG PHASE" lines in the log (for finding which one causes a defect that
 //                    only shows in one place of the game; keep the camera still meanwhile)
+//   F8               A/B sequence: like F7, but only "as launched", "synchronous readbacks" and
+//                    "target cache off", in turn four times, 5 s and 20 screenshots each
+//                    (~60 s): enough screenshots per mode to tell a defect that shows in one
+//                    frame out of ten (the vegetation of the 8th colossus' arena, 2026-10-20)
 //   F9               writes a marker to the log and saves a screenshot (for finding a
 //                    moment of play later)
 //   F10              captures the frame in RenderDoc (when started with SOTC_RENDERDOC)
@@ -452,10 +456,37 @@ constexpr DiagPhase DiagPhases[] = {
     {"LOD statistics on", 1u << diag::LodStatsOn},
     {"as launched again", 0},
 };
-constexpr double DiagPhaseSeconds = 4.0;
-constexpr double DiagSettleSeconds = 1.5; // before the first screenshot of a phase
-constexpr double DiagShotInterval = 0.2;
-constexpr int DiagShotsPerPhase = 12;
+// F8: the A/B sequence (see the top of the file).
+constexpr DiagPhase AbPhases[] = {
+    {"as launched", 0},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
+    {"target cache off", 1u << diag::TargetCacheOff},
+    {"as launched", 0},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
+    {"target cache off", 1u << diag::TargetCacheOff},
+    {"as launched", 0},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
+    {"target cache off", 1u << diag::TargetCacheOff},
+    {"as launched", 0},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
+    {"target cache off", 1u << diag::TargetCacheOff},
+};
+
+// A sequence of phases, each so many seconds long, with its screenshots taken every `interval`
+// seconds after `settle` seconds (the switch has taken effect).
+struct DiagSequence {
+    const char* key;
+    const DiagPhase* phases;
+    int count;
+    double seconds;
+    double settle;
+    double interval;
+    int shots;
+};
+constexpr DiagSequence FullSequence{"F7", DiagPhases, static_cast<int>(std::size(DiagPhases)),
+                                    4.0, 1.5, 0.2, 12};
+constexpr DiagSequence AbSequence{"F8", AbPhases, static_cast<int>(std::size(AbPhases)), 5.0, 0.8,
+                                  0.2, 20};
 // F6: GPU layer optimizations switched back to the safe way while playing (see the top of the
 // file). The ones that change bindings turn the bind memo off too (see DiagPhases).
 struct ModeSwitch {
@@ -474,6 +505,7 @@ constexpr ModeSwitch ModeSwitches[] = {
 std::size_t g_mode_switch = 0;
 
 bool g_diag_running = false;
+const DiagSequence* g_diag = &FullSequence;
 std::chrono::steady_clock::time_point g_diag_start;
 int g_diag_phase = -1;
 int g_diag_shots = 0;
@@ -485,8 +517,9 @@ void RunDiagSequence() {
     }
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - g_diag_start).count();
-    const int phase = static_cast<int>(elapsed / DiagPhaseSeconds);
-    if (phase >= static_cast<int>(std::size(DiagPhases))) {
+    const DiagSequence& sequence = *g_diag;
+    const int phase = static_cast<int>(elapsed / sequence.seconds);
+    if (phase >= sequence.count) {
         diag::SetToggles(ModeSwitches[g_mode_switch].toggles); // back to the F6 mode
         g_diag_running = false;
         LOG_INFO("Input", "==== DIAG sequence done ====");
@@ -495,12 +528,12 @@ void RunDiagSequence() {
     if (phase != g_diag_phase) {
         g_diag_phase = phase;
         g_diag_shots = 0;
-        diag::SetToggles(DiagPhases[phase].toggles);
-        LOG_INFO("Input", "==== DIAG PHASE {}: {} ====", phase, DiagPhases[phase].name);
+        diag::SetToggles(sequence.phases[phase].toggles);
+        LOG_INFO("Input", "==== DIAG PHASE {}: {} ====", phase, sequence.phases[phase].name);
     }
-    const double in_phase = elapsed - phase * DiagPhaseSeconds;
-    if (g_diag_shots < DiagShotsPerPhase &&
-        in_phase >= DiagSettleSeconds + g_diag_shots * DiagShotInterval) {
+    const double in_phase = elapsed - phase * sequence.seconds;
+    if (g_diag_shots < sequence.shots &&
+        in_phase >= sequence.settle + g_diag_shots * sequence.interval) {
         ++g_diag_shots;
         gpu::RequestScreenshot();
     }
@@ -1048,11 +1081,13 @@ void OnToolKey(SDL_Scancode key) {
         break;
     }
     case SDL_SCANCODE_F7:
+    case SDL_SCANCODE_F8:
         if (!g_diag_running) {
+            g_diag = key == SDL_SCANCODE_F7 ? &FullSequence : &AbSequence;
             g_diag_running = true;
             g_diag_start = std::chrono::steady_clock::now();
             g_diag_phase = -1;
-            LOG_INFO("Input", "==== DIAG sequence started (F7) ====");
+            LOG_INFO("Input", "==== DIAG sequence started ({}) ====", g_diag->key);
         }
         break;
     case SDL_SCANCODE_F10:
