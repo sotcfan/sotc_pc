@@ -13,6 +13,7 @@
 
 #include "common/log.h"
 #include "common/types.h"
+#include "diag/frame_trace.h"
 #include "hle/kernel/errno.h"
 #include "hle/kernel/kernel.h"
 #include "hle/registry.h"
@@ -77,6 +78,7 @@ PS4_SYSV_ABI u64 sceKernelGetTscFrequency() {
 
 PS4_SYSV_ABI s32 sceKernelUsleep(u32 microseconds) {
     perf::WaitScope perf_wait{"usleep"};
+    diag::trace::WaitScope trace_wait{diag::trace::Usleep, nullptr, SOTC_TRACE_CALLERS};
     std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
     return 0;
 }
@@ -143,6 +145,7 @@ PS4_SYSV_ABI s32 posix_gettimeofday(Ps4Timeval* out, void*) {
 
 PS4_SYSV_ABI s32 posix_nanosleep(const Ps4Timespec* duration, Ps4Timespec* remaining) {
     perf::WaitScope perf_wait{"nanosleep"};
+    diag::trace::WaitScope trace_wait{diag::trace::Nanosleep, nullptr, SOTC_TRACE_CALLERS};
     if (!duration) {
         SetErrno(BSD_EFAULT);
         return -1;

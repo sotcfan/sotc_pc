@@ -21,6 +21,7 @@
 #include "diag/camera_probe.h"
 #include "diag/copy_watch.h"
 #include "diag/data_watch.h"
+#include "diag/frame_trace.h"
 #include "diag/freeze_watch.h"
 #include "diag/memory_types.h"
 #include "diag/packet_stats.h"
@@ -191,6 +192,7 @@ int main(int argc, char** argv) {
         if (!gpu::Initialize(param ? static_cast<int>(param->sdk_version) : 0)) {
             return 1;
         }
+        diag::trace::Initialize();   // SOTC_FRAME_TRACE
         diag::InstallGnmTracer();    // SOTC_TRACE_GNM
         diag::InstallGnmRecorder();  // SOTC_RECORD_GNM
         diag::InstallResourceDump(); // SOTC_DUMP_RESOURCES

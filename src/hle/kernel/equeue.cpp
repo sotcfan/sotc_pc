@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/log.h"
+#include "diag/frame_trace.h"
 #include "hle/kernel/errno.h"
 #include "hle/registry.h"
 
@@ -78,6 +79,9 @@ public:
                 }
                 found = true;
             }
+        }
+        if (found && diag::trace::Enabled()) {
+            diag::trace::Wake(diag::trace::Equeue, this, 0);
         }
         condition_.notify_all();
         return found;
@@ -232,6 +236,12 @@ PS4_SYSV_ABI s32 sceKernelWaitEqueue(EventQueue* queue, KernelEvent* events, int
         return ErrorCode(BSD_EINVAL);
     }
     perf::WaitScope perf_wait{"equeue"};
+    if (diag::trace::Enabled()) {
+        diag::trace::WaitBegin(diag::trace::Equeue, queue, SOTC_TRACE_CALLERS);
+        const s32 result = queue->Wait(events, capacity, count, timeout);
+        diag::trace::WaitEnd(diag::trace::Equeue, queue);
+        return result;
+    }
     return queue->Wait(events, capacity, count, timeout);
 }
 

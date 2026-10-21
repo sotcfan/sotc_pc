@@ -10,6 +10,7 @@
 
 #include "common/log.h"
 #include "common/types.h"
+#include "diag/frame_trace.h"
 #include "hle/kernel/errno.h"
 #include "hle/kernel/kernel.h"
 #include "hle/registry.h"
@@ -228,6 +229,10 @@ PS4_SYSV_ABI s32 sceKernelSetEventFlag(EventFlag* flag, u64 pattern) {
     if (!flag) {
         return ErrorCode(BSD_ESRCH);
     }
+    if (diag::trace::Enabled()) {
+        diag::trace::Wake(diag::trace::EventFlag, flag,
+                          reinterpret_cast<u64>(__builtin_return_address(0)));
+    }
     flag->Set(pattern, reinterpret_cast<u64>(__builtin_return_address(0)));
     return 0;
 }
@@ -249,6 +254,12 @@ PS4_SYSV_ABI s32 sceKernelWaitEventFlag(EventFlag* flag, u64 pattern, u32 mode, 
         return ErrorCode(BSD_EINVAL);
     }
     perf::WaitScope perf_wait{"eventflag"};
+    if (diag::trace::Enabled()) {
+        diag::trace::WaitBegin(diag::trace::EventFlag, flag, SOTC_TRACE_CALLERS);
+        const s32 status = flag->Wait(pattern, mode, result, timeout);
+        diag::trace::WaitEnd(diag::trace::EventFlag, flag);
+        return status;
+    }
     return flag->Wait(pattern, mode, result, timeout);
 }
 

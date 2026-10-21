@@ -13,12 +13,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <csetjmp>
 #include <cstring>
 #include <string>
 
 #include "common/log.h"
 #include "common/types.h"
+#include "diag/frame_trace.h"
 #include "hle/kernel/errno.h"
 #include "hle/kernel/kernel.h"
 #include "hle/registry.h"
@@ -182,6 +184,21 @@ s32 MutexDestroy(Mutex** handle) {
 
 s32 MutexLock(Mutex** handle) {
     Mutex* mutex = GetMutex(handle);
+    // Frame trace: only a lock that waited more than 20 µs is a wait (the game's job workers
+    // fight over one mutex ~1.5 million times a second, mostly for a fraction of a microsecond).
+    if (mutex && diag::trace::Enabled()) {
+        const int tried = ::pthread_mutex_trylock(&mutex->host);
+        if (tried != EBUSY) {
+            return PosixResult(tried);
+        }
+        const std::uint64_t begin = diag::trace::Now();
+        const int result = ::pthread_mutex_lock(&mutex->host);
+        const std::uint64_t end = diag::trace::Now();
+        if (end - begin > 20'000) {
+            diag::trace::WaitSpan(diag::trace::Mutex, mutex, begin, end);
+        }
+        return PosixResult(result);
+    }
     return mutex ? PosixResult(::pthread_mutex_lock(&mutex->host)) : BSD_EINVAL;
 }
 
@@ -273,6 +290,7 @@ PS4_SYSV_ABI s32 pthread_cond_wait(Cond** cond, Mutex** mutex) {
     Cond* c = GetCond(cond);
     Mutex* m = GetMutex(mutex);
     perf::WaitScope perf_wait{"cond"};
+    diag::trace::WaitScope trace_wait{diag::trace::Cond, c, SOTC_TRACE_CALLERS};
     return c && m ? PosixResult(::pthread_cond_wait(&c->host, &m->host)) : BSD_EINVAL;
 }
 
@@ -284,6 +302,7 @@ PS4_SYSV_ABI s32 pthread_cond_timedwait(Cond** cond, Mutex** mutex,
         return BSD_EINVAL;
     }
     perf::WaitScope perf_wait{"condtimed"};
+    diag::trace::WaitScope trace_wait{diag::trace::CondTimed, c, SOTC_TRACE_CALLERS};
     const timespec host{static_cast<std::time_t>(deadline->tv_sec),
                         static_cast<long>(deadline->tv_nsec)};
     return PosixResult(::pthread_cond_timedwait(&c->host, &m->host, &host));
@@ -291,6 +310,9 @@ PS4_SYSV_ABI s32 pthread_cond_timedwait(Cond** cond, Mutex** mutex,
 
 PS4_SYSV_ABI s32 pthread_cond_broadcast(Cond** cond) {
     Cond* c = GetCond(cond);
+    if (c && diag::trace::Enabled()) {
+        diag::trace::Wake(diag::trace::Cond, c, reinterpret_cast<u64>(__builtin_return_address(0)));
+    }
     return c ? PosixResult(::pthread_cond_broadcast(&c->host)) : BSD_EINVAL;
 }
 

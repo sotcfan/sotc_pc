@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 #include "host_module.h"
 #include "common/thread.h"
+#include "diag/frame_trace.h"
 #include <x86intrin.h>
 
 #include <algorithm>
@@ -703,6 +704,9 @@ const int g_timeline_every = [] {
 }();
 
 void MarkAt(char kind, uint64_t ns, uint64_t value) {
+    if (diag::trace::Enabled()) {
+        diag::trace::Mark(kind, ns, value);
+    }
     if (!g_timeline_every) {
         return;
     }
@@ -711,6 +715,9 @@ void MarkAt(char kind, uint64_t ns, uint64_t value) {
 }
 
 void Mark(char kind, uint64_t value) {
+    if (diag::trace::Enabled()) {
+        diag::trace::Mark(kind, Now(), value);
+    }
     if (!g_timeline_every) {
         return;
     }
