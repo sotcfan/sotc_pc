@@ -27,10 +27,10 @@
 //
 // Tool keys (fixed, not in controls.ini):
 //   F1               releases the mouse, or captures it again
-//   F6               safe mode switch: each press moves to the next of "strict barriers",
-//                    "whole buffers", "synchronous readbacks", "all three" and back to normal
-//                    (ModeSwitches below; a "MODE" line in the log), and it stays while playing:
-//                    for defects that only show while moving, which F7 cannot catch
+//   F6               mode switch: each press moves to the next of "60 FPS cap", "FSR off",
+//                    "both" and back to normal (ModeSwitches below; a "MODE" line in the log),
+//                    and it stays while playing: for defects that only show while moving, which
+//                    F7 cannot catch
 //   F7               diagnostic sequence: for ~4 s each, switches one GPU layer optimization
 //                    after another back to the safe way (src/diag/toggles.h, DiagPhases below)
 //                    and takes 12 screenshots, with
@@ -487,20 +487,19 @@ constexpr DiagSequence FullSequence{"F7", DiagPhases, static_cast<int>(std::size
                                     4.0, 1.5, 0.2, 12};
 constexpr DiagSequence AbSequence{"F8", AbPhases, static_cast<int>(std::size(AbPhases)), 5.0, 0.8,
                                   0.2, 20};
-// F6: GPU layer optimizations switched back to the safe way while playing (see the top of the
-// file). The ones that change bindings turn the bind memo off too (see DiagPhases).
+// F6: settings switched while playing (see the top of the file). Until 2026-10-21 it switched
+// the GPU layer's riskiest optimizations (strict barriers, whole buffers, synchronous readbacks:
+// still in F7), which turned out not to be the cause of the flickering vegetation of the 8th
+// colossus' arena; now the frame rate cap and FSR, the next suspects.
 struct ModeSwitch {
     const char* name;
     std::uint32_t toggles;
 };
-constexpr std::uint32_t SafeThree =
-    (1u << diag::StrictBarriersOn) | (1u << diag::WholeBuffersOn) | (1u << diag::SyncReadbackOn);
 constexpr ModeSwitch ModeSwitches[] = {
     {"normal (as launched)", 0},
-    {"strict barriers (bind memo off)", (1u << diag::StrictBarriersOn) | (1u << diag::BindMemoOff)},
-    {"whole buffers (bind memo off)", (1u << diag::WholeBuffersOn) | (1u << diag::BindMemoOff)},
-    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
-    {"all three (bind memo off)", SafeThree | (1u << diag::BindMemoOff)},
+    {"60 FPS cap", 1u << diag::Cap60On},
+    {"FSR off (no jitter)", 1u << diag::FsrOff},
+    {"60 FPS cap and FSR off", (1u << diag::Cap60On) | (1u << diag::FsrOff)},
 };
 std::size_t g_mode_switch = 0;
 

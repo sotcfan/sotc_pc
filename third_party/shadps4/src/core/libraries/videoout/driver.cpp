@@ -16,6 +16,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "perf_temp.h" // sotcport TEMP
+#include "diag/toggles.h" // sotcport: F6 diagnostics
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -547,12 +548,16 @@ void VideoOutDriver::UncappedPresentLoop(std::stop_token token, std::chrono::nan
     auto next_vblank = Clock::now() + period;
     auto last_flip = Clock::now();
     auto next_flip = Clock::now(); // with a frame rate limit: the earliest time for the next flip
+    // F6 can cap the frame rate at 60 while playing (diag::Cap60On), in place of the limiter.
+    constexpr auto Period60 = std::chrono::nanoseconds(1'000'000'000 / 60);
     while (!token.stop_requested()) {
         Request request{};
+        const bool cap60 = diag::On(diag::Cap60On);
+        const bool limited = cap60 || limiter.Active();
         {
             std::unique_lock lk{mutex};
             const auto flip_allowed = [&] {
-                return !limiter.Active() || Clock::now() >= next_flip;
+                return !limited || Clock::now() >= next_flip;
             };
             if (!requests.empty() && !flip_allowed()) {
                 // A frame waits for its beat (frame rate limit): sleep until then or the vblank.
@@ -572,7 +577,9 @@ void VideoOutDriver::UncappedPresentLoop(std::stop_token token, std::chrono::nan
             const auto now = Clock::now();
             perf::NoteFrameInterval( // sotcport TEMP: pacing report
                 std::chrono::duration_cast<std::chrono::nanoseconds>(now - last_flip).count());
-            if (limiter.Active()) {
+            if (cap60) {
+                next_flip = std::max(next_flip + Period60, now);
+            } else if (limiter.Active()) {
                 limiter.OnPresent(now, request.submitted, next_flip);
                 // An even beat: the next slot follows this one, unless the game fell behind.
                 next_flip = std::max(next_flip + limiter.Period(), now);

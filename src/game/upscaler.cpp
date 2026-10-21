@@ -42,6 +42,7 @@
 
 #include "common/log.h"
 #include "common/types.h"
+#include "diag/toggles.h"
 #include "gpu/upscaler.h"
 #include "loader/hook.h"
 
@@ -88,7 +89,9 @@ u32 FrameCounter(const u8* view_state) {
 
 Float2 PS4_SYSV_ABI Jitter(u8* view_state, const Float2* scale, u32 phases) {
     const u64 return_address = reinterpret_cast<u64>(__builtin_return_address(0));
-    if (g_fsr && return_address == MainJitterReturn) {
+    // F6 can switch FSR off while playing (diag::FsrOff): the game's own jitter then, which is
+    // none, its anti-aliasing being off.
+    if (g_fsr && return_address == MainJitterReturn && !diag::On(diag::FsrOff)) {
         // FSR's jitter, as ffxFsr3GetJitterOffset: Halton from index 1, minus a half.
         const u32 frame = FrameCounter(view_state);
         const u32 index = frame % gpu::upscaler::JitterPhases();

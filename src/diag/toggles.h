@@ -21,6 +21,8 @@ enum Toggle : std::uint32_t {
     StrictBarriersOn,      // as SOTC_STRICT_BARRIERS=1
     WholeBuffersOn,        // as SOTC_UNBOUNDED_WINDOW=0
     SyncReadbackOn,        // as SOTC_ASYNC_READBACK unset
+    Cap60On,               // as SOTC_FPS_LIMIT=60 (with SOTC_UNCAPPED or SOTC_FPS_LIMIT)
+    FsrOff,                // as SOTC_UPSCALER unset: the game's image and jitter (no TAA)
 };
 
 inline std::atomic<std::uint32_t> g_toggles{0};

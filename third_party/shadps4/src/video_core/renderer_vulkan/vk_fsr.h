@@ -86,6 +86,7 @@ private:
     VideoCore::UniqueImage output;
     vk::UniqueImageView output_view;
     bool output_initialized = false;
+    bool resume = false; ///< switched off at run time (F6): the history is stale when it is back
 
     VideoCore::ImageId depth_id{};
     VideoCore::ImageId motion_id{};

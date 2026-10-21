@@ -7,9 +7,12 @@
 
 #include "video_core/renderer_vulkan/vk_fsr.h"
 
+#include <utility>
+
 #include <ffx_vk_portable.h>
 
 #include "common/logging/log.h"
+#include "diag/toggles.h" // sotcport: F6 diagnostics
 #include "gpu/gpu.h"
 #include "gpu/upscaler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -151,6 +154,10 @@ bool FsrPass::ReplaceScene(VideoCore::ImageId scene_id, vk::ImageView& view,
     if (failed || !depth_id || !motion_id) {
         return false;
     }
+    if (diag::On(diag::FsrOff)) {
+        resume = true;
+        return false;
+    }
     if (!context) {
         if (!CreateContext()) {
             failed = true;
@@ -226,7 +233,7 @@ bool FsrPass::ReplaceScene(VideoCore::ImageId scene_id, vk::ImageView& view,
                      scene.info.size.width, scene.info.size.height, depth.info.size.width,
                      depth.info.size.height);
         }
-        info.reset = frame_id == 0;
+        info.reset = frame_id == 0 || std::exchange(resume, false);
         info.frameId = ++frame_id;
 
         const bool first = !output_initialized;
