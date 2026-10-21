@@ -27,6 +27,10 @@
 //
 // Tool keys (fixed, not in controls.ini):
 //   F1               releases the mouse, or captures it again
+//   F6               safe mode switch: each press moves to the next of "strict barriers",
+//                    "whole buffers", "synchronous readbacks", "all three" and back to normal
+//                    (ModeSwitches below; a "MODE" line in the log), and it stays while playing:
+//                    for defects that only show while moving, which F7 cannot catch
 //   F7               diagnostic sequence: for ~4 s each, switches one GPU layer optimization
 //                    after another back to the safe way (src/diag/toggles.h, DiagPhases below)
 //                    and takes 12 screenshots, with
@@ -452,6 +456,23 @@ constexpr double DiagPhaseSeconds = 4.0;
 constexpr double DiagSettleSeconds = 1.5; // before the first screenshot of a phase
 constexpr double DiagShotInterval = 0.2;
 constexpr int DiagShotsPerPhase = 12;
+// F6: GPU layer optimizations switched back to the safe way while playing (see the top of the
+// file). The ones that change bindings turn the bind memo off too (see DiagPhases).
+struct ModeSwitch {
+    const char* name;
+    std::uint32_t toggles;
+};
+constexpr std::uint32_t SafeThree =
+    (1u << diag::StrictBarriersOn) | (1u << diag::WholeBuffersOn) | (1u << diag::SyncReadbackOn);
+constexpr ModeSwitch ModeSwitches[] = {
+    {"normal (as launched)", 0},
+    {"strict barriers (bind memo off)", (1u << diag::StrictBarriersOn) | (1u << diag::BindMemoOff)},
+    {"whole buffers (bind memo off)", (1u << diag::WholeBuffersOn) | (1u << diag::BindMemoOff)},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
+    {"all three (bind memo off)", SafeThree | (1u << diag::BindMemoOff)},
+};
+std::size_t g_mode_switch = 0;
+
 bool g_diag_running = false;
 std::chrono::steady_clock::time_point g_diag_start;
 int g_diag_phase = -1;
@@ -466,7 +487,7 @@ void RunDiagSequence() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - g_diag_start).count();
     const int phase = static_cast<int>(elapsed / DiagPhaseSeconds);
     if (phase >= static_cast<int>(std::size(DiagPhases))) {
-        diag::SetToggles(0);
+        diag::SetToggles(ModeSwitches[g_mode_switch].toggles); // back to the F6 mode
         g_diag_running = false;
         LOG_INFO("Input", "==== DIAG sequence done ====");
         return;
@@ -1014,6 +1035,16 @@ void OnToolKey(SDL_Scancode key) {
             std::fprintf(g_record, "%llu F9\n", static_cast<unsigned long long>(g_reads));
             std::fflush(g_record);
         }
+        break;
+    }
+    case SDL_SCANCODE_F6: {
+        // g_mutex is held (both callers), as for RunDiagSequence, which also sets the toggles.
+        g_mode_switch = (g_mode_switch + 1) % std::size(ModeSwitches);
+        if (!g_diag_running) {
+            diag::SetToggles(ModeSwitches[g_mode_switch].toggles);
+        }
+        LOG_INFO("Input", "==== MODE {}: {} (F6) ====", g_mode_switch,
+                 ModeSwitches[g_mode_switch].name);
         break;
     }
     case SDL_SCANCODE_F7:
