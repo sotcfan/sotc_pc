@@ -27,8 +27,8 @@
 //
 // Tool keys (fixed, not in controls.ini):
 //   F1               releases the mouse, or captures it again
-//   F6               mode switch: each press moves to the next of "60 FPS cap", "FSR off",
-//                    "both" and back to normal (ModeSwitches below; a "MODE" line in the log),
+//   F6               mode switch: each press moves to the next of "shadow copies off", "60 FPS
+//                    cap", "FSR off", "all three" and back to normal (ModeSwitches below; a "MODE" line in the log),
 //                    and it stays while playing: for defects that only show while moving, which
 //                    F7 cannot catch
 //   F7               diagnostic sequence: for ~4 s each, switches one GPU layer optimization
@@ -437,14 +437,14 @@ struct DiagPhase {
     std::uint32_t toggles;
 };
 // The phases that change bindings (barriers, buffer sizes) also turn the bind memo off: a draw
-// that reuses its bindings would keep the ones made before the switch. Shadow copies are off by
-// default since 2026-10-17 (SOTC_SHADOW_COPY=1), so they have no phase of their own.
+// that reuses its bindings would keep the ones made before the switch.
 constexpr std::uint32_t AllOff =
     (1u << diag::ShadowCopyOff) | (1u << diag::SrtPatchesOff) | (1u << diag::BindMemoOff) |
     (1u << diag::TargetCacheOff) | (1u << diag::TextureLookupOff) |
     (1u << diag::StrictBarriersOn) | (1u << diag::WholeBuffersOn) | (1u << diag::SyncReadbackOn);
 constexpr DiagPhase DiagPhases[] = {
     {"as launched", 0},
+    {"shadow copies off", 1u << diag::ShadowCopyOff},
     {"strict barriers (bind memo off)", (1u << diag::StrictBarriersOn) | (1u << diag::BindMemoOff)},
     {"whole buffers (bind memo off)", (1u << diag::WholeBuffersOn) | (1u << diag::BindMemoOff)},
     {"synchronous readbacks", 1u << diag::SyncReadbackOn},
@@ -490,16 +490,18 @@ constexpr DiagSequence AbSequence{"F8", AbPhases, static_cast<int>(std::size(AbP
 // F6: settings switched while playing (see the top of the file). Until 2026-10-21 it switched
 // the GPU layer's riskiest optimizations (strict barriers, whole buffers, synchronous readbacks:
 // still in F7), which turned out not to be the cause of the flickering vegetation of the 8th
-// colossus' arena; now the frame rate cap and FSR, the next suspects.
+// colossus' arena; now shadow copies (on again by default since 2026-10-19, and the cause of a
+// similar blinking after the bridge cutscene on 2026-10-14), the frame rate cap and FSR.
 struct ModeSwitch {
     const char* name;
     std::uint32_t toggles;
 };
 constexpr ModeSwitch ModeSwitches[] = {
     {"normal (as launched)", 0},
+    {"shadow copies off", 1u << diag::ShadowCopyOff},
     {"60 FPS cap", 1u << diag::Cap60On},
     {"FSR off (no jitter)", 1u << diag::FsrOff},
-    {"60 FPS cap and FSR off", (1u << diag::Cap60On) | (1u << diag::FsrOff)},
+    {"all three", (1u << diag::ShadowCopyOff) | (1u << diag::Cap60On) | (1u << diag::FsrOff)},
 };
 std::size_t g_mode_switch = 0;
 
