@@ -225,6 +225,9 @@ private:
     std::array<VAddr, 32> hot_windows{}; // where readbacks happened lately (window starts)
     u32 hot_windows_next = 0;
 
+    /// sotcport: a read of guest memory on its way to the GPU (see
+    /// Rasterizer::RewindShadowWrites).
+    void RewindShadowWrites(VAddr address, u8* data, u64 size);
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 

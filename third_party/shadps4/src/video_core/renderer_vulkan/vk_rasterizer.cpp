@@ -1020,12 +1020,17 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
         return false;
     }
     // Writes still queued for stage B to the destination come first in GPU order: let stage B
-    // record them (they mark what they write), then those marks are dropped for the bytes this
-    // copy overwrites.
+    // record them (they mark what they write).
     if (PendingWriteOverlaps(dst_address, dst_bytes)) {
         DrainDrawPipe(DrawPipe::ReasonSrtPending);
     }
-    buffer_cache.ForgetGpuWrites(dst_address, dst_bytes);
+    // A destination the GPU wrote stays the GPU's to copy: until stage B reaches this copy,
+    // those bytes are the GPU's in stream order, and guest memory does not have them to keep
+    // for RewindShadowWrites. (This used to drop the marks: draws before the copy then read
+    // guest memory, the copy's result, early.)
+    if (buffer_cache.AreBytesGpuModified(dst_address, dst_bytes)) {
+        return false;
+    }
     static std::vector<u32> source, result;
     source.resize(src.num_records);
     memory->CopySparseMemory(src_address, reinterpret_cast<u8*>(source.data()), src_bytes);
@@ -1034,6 +1039,13 @@ bool Rasterizer::ShadowCopyShader(const ComputePipeline* pipeline) {
         const u64 index = i % period;
         result[i] = index < source.size() ? source[index] : 0;
     }
+    // Stage B is still recording packets before this one, and copies guest memory to the GPU as
+    // it does (small read-only buffers, uploads): what it reads there from now on, the copy's
+    // result, is from its future. So the write is noted first (with the bytes it replaces) and
+    // stage B puts those bytes back (RewindShadowWrites) until it reaches the copy. Without
+    // this, draws before the copy read its result: the 8th colossus' arena flickered (its
+    // vegetation tables, written for one view and read by the one before, 2026-10-21).
+    NoteShadowWrite(dst_address, dst_bytes);
     memory->TryWriteBacking(reinterpret_cast<void*>(dst_address), result.data(), dst_bytes);
     shadow_result_address = dst_address;
     shadow_result.assign(result.begin(), result.end());
@@ -1355,6 +1367,121 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         }
     }
     return false;
+}
+
+// sotcport: SOTC_SHADOW_GUARD=0 turns RewindShadowWrites off (A/B); SOTC_LOG_SHADOW_GUARD=1
+// reports every 10 s how many reads it corrected (draws that would have read a shadow copy's
+// result before the copy).
+namespace {
+const bool g_shadow_guard = [] {
+    const char* env = std::getenv("SOTC_SHADOW_GUARD");
+    return !env || *env != '0';
+}();
+const bool g_log_shadow_guard = std::getenv("SOTC_LOG_SHADOW_GUARD") != nullptr;
+std::atomic<u64> g_guard_writes{0}, g_guard_reads{0}, g_guard_corrected{0}, g_guard_bytes{0};
+} // namespace
+
+void Rasterizer::CountShadowPages(const ShadowWrite& write, s32 delta) {
+    for (VAddr page = write.begin >> 12; page <= (write.end - 1) >> 12; ++page) {
+        shadow_page_counts[page % ShadowPageSlots].fetch_add(static_cast<u32>(delta),
+                                                             std::memory_order_release);
+    }
+}
+
+void Rasterizer::NoteShadowWrite(VAddr address, u64 size) {
+    // Stage A, before writing guest memory. The packet that writes it on stage B is the next
+    // one posted (PostShadowResult): Reached(Head() + 1) once stage B has run it.
+    if (!g_shadow_guard || !draw_pipe) {
+        return;
+    }
+    std::scoped_lock lock{shadow_writes_mutex};
+    PruneShadowWrites();
+    ShadowWrite write{address, address + size, draw_pipe->Head() + 1, {}};
+    if (!shadow_spare.empty()) {
+        write.old = std::move(shadow_spare.back());
+        shadow_spare.pop_back();
+    }
+    write.old.resize(size);
+    memory->CopySparseMemory(address, write.old.data(), size);
+    // The page counts are raised (release) before the guest write that follows: x86 keeps
+    // stores in order, so a reader that saw the new bytes sees the counts too, then the entry
+    // under the lock.
+    CountShadowPages(write, 1);
+    shadow_writes.push_back(std::move(write));
+    g_guard_writes.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Rasterizer::PruneShadowWrites() {
+    // Oldest first: drop from the front while stage B has passed them.
+    while (!shadow_writes.empty() && draw_pipe->Reached(shadow_writes.front().position)) {
+        CountShadowPages(shadow_writes.front(), -1);
+        if (shadow_spare.size() < 256) {
+            shadow_spare.push_back(std::move(shadow_writes.front().old));
+        }
+        shadow_writes.pop_front();
+    }
+}
+
+void Rasterizer::RewindShadowWrites(VAddr address, u8* data, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    // Lock-free filter: the pages of the read (all slots for a large one).
+    const VAddr first = address >> 12, last = (address + size - 1) >> 12;
+    bool maybe = false;
+    if (last - first + 1 >= ShadowPageSlots) {
+        for (const auto& count : shadow_page_counts) {
+            maybe |= count.load(std::memory_order_acquire) != 0;
+        }
+    } else {
+        for (VAddr page = first; page <= last && !maybe; ++page) {
+            maybe = shadow_page_counts[page % ShadowPageSlots].load(std::memory_order_acquire) != 0;
+        }
+    }
+    if (!maybe) {
+        return;
+    }
+    std::scoped_lock lock{shadow_writes_mutex};
+    PruneShadowWrites();
+    // The writes stage B has not reached overlapping the read, latest first: each puts back
+    // the bytes from before it, so the earliest one's (the value until then) is left.
+    u64 changed = 0;
+    bool any = false;
+    const VAddr end = address + size;
+    for (auto it = shadow_writes.rbegin(); it != shadow_writes.rend(); ++it) {
+        const ShadowWrite& write = *it;
+        if (write.begin >= end || address >= write.end) {
+            continue;
+        }
+        any = true;
+        const VAddr from = std::max(address, write.begin);
+        const VAddr to = std::min(end, write.end);
+        u8* target = data + (from - address);
+        const u8* source = write.old.data() + (from - write.begin);
+        if (g_log_shadow_guard) {
+            for (VAddr i = 0; i < to - from; ++i) {
+                changed += target[i] != source[i];
+            }
+        }
+        std::memcpy(target, source, to - from);
+    }
+    if (g_log_shadow_guard && any) {
+        g_guard_reads.fetch_add(1, std::memory_order_relaxed);
+        if (changed) {
+            g_guard_corrected.fetch_add(1, std::memory_order_relaxed);
+            g_guard_bytes.fetch_add(changed, std::memory_order_relaxed);
+        }
+        static auto last_report = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_report > std::chrono::seconds(10)) {
+            last_report = now;
+            LOG_INFO(Render,
+                     "shadow guard: {} shadow writes, {} stage B reads over unreached ones, {} "
+                     "of them corrected ({} bytes from the future)",
+                     g_guard_writes.load(), g_guard_reads.load(), g_guard_corrected.load(),
+                     g_guard_bytes.load());
+        }
+    }
 }
 
 void Rasterizer::PostPacket(PacketKind kind, const Pipeline* pipeline, bool is_indexed,

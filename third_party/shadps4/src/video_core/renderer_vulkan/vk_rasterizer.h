@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <deque>
 #include <functional>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
@@ -111,6 +112,12 @@ public:
     // Stage A: whether a draw still queued for stage B will write [address, +size) (storage
     // buffers and images it binds). Used before stage A reads GPU-written guest memory.
     [[nodiscard]] bool PendingWriteOverlaps(VAddr address, u64 size);
+    /// sotcport: for stage B, which copies guest memory to the GPU (BufferCache: the stream
+    /// buffer, uploads) as it records each packet. `data` holds [address, +size) as read from
+    /// guest memory just now; the bytes a shadow copy wrote there ahead of stage B (stage A runs
+    /// ahead, see ShadowCopyShader) get back the value they have at stage B's point in the
+    /// stream. Called after reading guest memory (stage A registers before writing it).
+    void RewindShadowWrites(VAddr address, u8* data, u64 size);
 
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
@@ -209,6 +216,24 @@ private:
     u64 shadow_verify_bytes = 0;
     std::string shadow_verify_info;
     bool next_packet_shadowed = false; ///< stage A: the packet about to be posted was
+    /// sotcport: shadow copies stage A wrote to guest memory that stage B has not reached yet,
+    /// with the bytes they replaced (see RewindShadowWrites), oldest first (stage A adds them
+    /// in stream order). Stage A adds, both drop the ones stage B has passed.
+    struct ShadowWrite {
+        VAddr begin, end;
+        u64 position;        ///< ring position after the packet that writes it on stage B
+        std::vector<u8> old; ///< the bytes before the write: their value until stage B gets there
+    };
+    void NoteShadowWrite(VAddr address, u64 size);
+    void PruneShadowWrites(); ///< with shadow_writes_mutex held
+    /// Live shadow writes per 4 KiB page (hashed): a read whose pages all count 0 overlaps
+    /// none, without taking the lock (the stream buffer path reads guest memory constantly).
+    static constexpr u32 ShadowPageSlots = 4096;
+    std::array<std::atomic<u32>, ShadowPageSlots> shadow_page_counts{};
+    void CountShadowPages(const ShadowWrite& write, s32 delta);
+    std::mutex shadow_writes_mutex;
+    std::deque<ShadowWrite> shadow_writes;
+    std::vector<std::vector<u8>> shadow_spare; ///< buffers of dropped writes, reused
     void MaybeFlushEarly();
     u32 work_since_flush = 0; ///< draws and dispatches recorded since the last early flush
     void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr address, u32 offset,

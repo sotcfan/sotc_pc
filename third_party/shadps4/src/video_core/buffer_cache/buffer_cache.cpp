@@ -466,6 +466,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         diag::NoteMemoryAccess(diag::MemAccess::UploadRead, device_addr, size);
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
+        RewindShadowWrites(device_addr, data, size); // sotcport
         stream_buffer.Commit();
         return {&stream_buffer, offset};
     }
@@ -510,6 +511,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,
                                               instance.StorageMinAlignment());
     memory->CopySparseMemory(device_addr, staging.mapped, staging.size);
+    RewindShadowWrites(device_addr, staging.mapped, staging.size); // sotcport
     staging.Flush();
     return {staging.buffer, staging.offset};
 }
@@ -561,6 +563,13 @@ bool BufferCache::PeekGpuMemory(VAddr device_addr, u64 size, u8* out) {
     download.buffer->Invalidate(download.offset, download.size);
     std::memcpy(out, download.mapped, size);
     return true;
+}
+
+void BufferCache::RewindShadowWrites(VAddr address, u8* data, u64 size) {
+    // sotcport: see Rasterizer::RewindShadowWrites (two-stage draw pipeline only).
+    if (auto* rasterizer = liverpool->GetRasterizer(); rasterizer && rasterizer->UseDrawPipe()) {
+        rasterizer->RewindShadowWrites(address, data, size);
+    }
 }
 
 void BufferCache::SynchronizeDmaBuffers() {
@@ -734,6 +743,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         for (auto& copy : copies) {
             diag::NoteMemoryAccess(diag::MemAccess::UploadRead, copy.dstOffset, copy.size);
             memory->CopySparseMemory(copy.dstOffset, staging.mapped + copy.srcOffset, copy.size);
+            RewindShadowWrites(copy.dstOffset, staging.mapped + copy.srcOffset,
+                               copy.size); // sotcport
             copy.srcOffset += staging.offset;
             copy.dstOffset -= arena->cpu_addr;
         }
