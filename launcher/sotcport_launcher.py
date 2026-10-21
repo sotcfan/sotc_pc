@@ -353,7 +353,7 @@ class LauncherWindow(QMainWindow):
         self.process = None
         self.log_file = None  # this session's log in log_folder()
         self.setWindowTitle("sotcport — Shadow of the Colossus")
-        self.resize(760, 640)
+        self.resize(760, 793)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.build_game_tab(), tr("Game"))
