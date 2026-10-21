@@ -183,6 +183,7 @@ PT_BR = {
         "no log).",
     "Log level": "Nível do log",
     # Log tab
+    "Open the log folder": "Abrir a pasta dos logs",
     "Copy": "Copiar",
     "Clear": "Limpar",
 }

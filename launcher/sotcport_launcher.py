@@ -19,6 +19,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
@@ -41,6 +42,9 @@ CONFIG_FILE = CONFIG_DIR / "settings.json"
 DEFAULT_DATA_DIR = (Path(os.environ.get("APPDATA", Path.home())) / "sotcport" if WINDOWS else
                     Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "sotcport")
 MAX_LOG_LINES = 5000
+# Every session's log is also written to <data folder>/logs (the tab keeps only the last
+# MAX_LOG_LINES lines, and a pasted log gets cut): the newest LOG_FILES_KEPT are kept.
+LOG_FILES_KEPT = 10
 
 # Choices: (label, value). Labels are translated when shown; the first one is the default
 # unless DEFAULTS says otherwise.
@@ -347,6 +351,7 @@ class LauncherWindow(QMainWindow):
         self.settings = load_settings()
         set_language(self.settings["ui_language"])
         self.process = None
+        self.log_file = None  # this session's log in log_folder()
         self.setWindowTitle("sotcport — Shadow of the Colossus")
         self.resize(760, 640)
 
@@ -596,10 +601,13 @@ class LauncherWindow(QMainWindow):
         self.log.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(self.log, 1)
         row = QHBoxLayout()
+        folder = QPushButton(tr("Open the log folder"))
+        folder.clicked.connect(self.on_open_log_folder)
         copy = QPushButton(tr("Copy"))
         copy.clicked.connect(lambda: QApplication.clipboard().setText(self.log.toPlainText()))
         clear = QPushButton(tr("Clear"))
         clear.clicked.connect(self.log.clear)
+        row.addWidget(folder)
         row.addStretch(1)
         row.addWidget(copy)
         row.addWidget(clear)
@@ -780,6 +788,27 @@ class LauncherWindow(QMainWindow):
     def data_path(self):
         return Path(self.data_dir.text().strip() or DEFAULT_DATA_DIR).expanduser()
 
+    def log_folder(self):
+        return self.data_path() / "logs"
+
+    def on_open_log_folder(self):
+        folder = self.log_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def open_log_file(self):
+        """A new log file for this session (sotcport-<date>-<time>.log); older ones beyond
+        LOG_FILES_KEPT are deleted. None if the folder cannot be written."""
+        folder = self.log_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for old in sorted(folder.glob("sotcport-*.log"))[:-(LOG_FILES_KEPT - 1) or None]:
+                old.unlink()
+            path = folder / time.strftime("sotcport-%Y%m%d-%H%M%S.log")
+            return open(path, "w", encoding="utf-8")
+        except OSError:
+            return None
+
     def on_choose_executable(self):
         path, _ = QFileDialog.getOpenFileName(self, tr("Choose the sotcport executable"),
                                               str(LAUNCHER_DIR.parent))
@@ -817,6 +846,9 @@ class LauncherWindow(QMainWindow):
             environment.insert(key, value)
 
         self.log.clear()
+        if self.log_file is not None:
+            self.log_file.close()
+        self.log_file = self.open_log_file()
         settings_env = " ".join(f"{k}={v}" for k, v in game_environment(s, self.native_size()).items())
         self.append_log(f"$ {settings_env} {executable} {' '.join(arguments)}\n")
         self.process = QProcess(self)
@@ -842,6 +874,9 @@ class LauncherWindow(QMainWindow):
             self.append_log(data)
 
     def append_log(self, text):
+        if self.log_file is not None:
+            self.log_file.write(text)
+            self.log_file.flush()
         self.log.moveCursor(QTextCursor.End)
         self.log.insertPlainText(text)
         self.log.moveCursor(QTextCursor.End)
@@ -849,6 +884,9 @@ class LauncherWindow(QMainWindow):
     def on_finished(self, code, _status):
         self.on_output()
         self.append_log("\n" + tr("The game closed (exit status {})").format(code) + "\n")
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
         self.process = None
         self.update_state()
 

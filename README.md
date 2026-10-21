@@ -61,7 +61,9 @@ Saves and settings go to `~/.local/share/sotcport` (`--data <folder>` changes it
 `launcher/sotcport-launcher.sh` opens a window that picks your dump, sets the options and starts
 the game, with its log. It needs PySide6 (Arch/CachyOS: `pacman -S pyside6`; Debian/Ubuntu:
 `apt install python3-pyside6.qtwidgets`; elsewhere `pip install PySide6`);
-`launcher/install-desktop.sh` adds it to the application menu.
+`launcher/install-desktop.sh` adds it to the application menu. Each session's log is also saved
+in `<data folder>/logs` (the 10 newest; "Open the log folder" in the Log tab): attach the file to
+a bug report.
 
 - **Display:** fullscreen (borderless, Alt+Enter toggles it), monitor, window size, VSync (present
   mode), PS4 Pro mode, the frame rate limit and the game's resolution: by default the monitor's
