@@ -2583,7 +2583,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                     const char* mb = std::getenv("SOTC_UNBOUNDED_WINDOW");
                     return (mb ? std::strtoull(mb, nullptr, 0) : u64{64}) << 20;
                 }();
-                if (unbounded_window && !desc.is_written && vsharp.GetSize() >= (u64{1} << 30)) {
+                if (unbounded_window && !diag::On(diag::WholeBuffersOn) && !desc.is_written &&
+                    vsharp.GetSize() >= (u64{1} << 30)) {
                     size = std::min(size, unbounded_window);
                 }
                 if (size != vsharp.GetSize()) {
@@ -2608,7 +2609,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
                 // sotcport: a game shader's own binding (see Runtime::AccessBuffer).
                 static const bool strict = std::getenv("SOTC_STRICT_BARRIERS") != nullptr;
-                const bool guest = !strict && DrawPipe::OnStageB();
+                const bool guest =
+                    !strict && !diag::On(diag::StrictBarriersOn) && DrawPipe::OnStageB();
                 bound_buffers.emplace_back(buffer, offset, size, src_access, guest);
                 // sotcport: a streamed copy is made again for every draw (see BindMemo).
                 if (memo_recording && buffer == &buffer_cache.GetStreamBuffer()) {

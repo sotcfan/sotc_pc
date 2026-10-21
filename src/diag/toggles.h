@@ -18,6 +18,9 @@ enum Toggle : std::uint32_t {
     TargetCacheOff,        // as SOTC_NO_TARGET_CACHE
     TextureLookupOff,      // as SOTC_NO_TEXTURE_CACHE_LOOKUP
     LodStatsOn,            // as SOTC_LOD_STATS=1
+    StrictBarriersOn,      // as SOTC_STRICT_BARRIERS=1
+    WholeBuffersOn,        // as SOTC_UNBOUNDED_WINDOW=0
+    SyncReadbackOn,        // as SOTC_ASYNC_READBACK unset
 };
 
 inline std::atomic<std::uint32_t> g_toggles{0};

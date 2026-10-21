@@ -27,8 +27,9 @@
 //
 // Tool keys (fixed, not in controls.ini):
 //   F1               releases the mouse, or captures it again
-//   F7               diagnostic sequence: for ~4 s each, turns off one GPU layer optimization
-//                    after another (src/diag/toggles.h) and takes 12 screenshots, with
+//   F7               diagnostic sequence: for ~4 s each, switches one GPU layer optimization
+//                    after another back to the safe way (src/diag/toggles.h, DiagPhases below)
+//                    and takes 12 screenshots, with
 //                    "DIAG PHASE" lines in the log (for finding which one causes a defect that
 //                    only shows in one place of the game; keep the camera still meanwhile)
 //   F9               writes a marker to the log and saves a screenshot (for finding a
@@ -427,16 +428,23 @@ struct DiagPhase {
     const char* name;
     std::uint32_t toggles;
 };
+// The phases that change bindings (barriers, buffer sizes) also turn the bind memo off: a draw
+// that reuses its bindings would keep the ones made before the switch. Shadow copies are off by
+// default since 2026-10-17 (SOTC_SHADOW_COPY=1), so they have no phase of their own.
+constexpr std::uint32_t AllOff =
+    (1u << diag::ShadowCopyOff) | (1u << diag::SrtPatchesOff) | (1u << diag::BindMemoOff) |
+    (1u << diag::TargetCacheOff) | (1u << diag::TextureLookupOff) |
+    (1u << diag::StrictBarriersOn) | (1u << diag::WholeBuffersOn) | (1u << diag::SyncReadbackOn);
 constexpr DiagPhase DiagPhases[] = {
     {"as launched", 0},
-    {"shadow copies off", 1u << diag::ShadowCopyOff},
-    {"SRT patches off", 1u << diag::SrtPatchesOff},
+    {"strict barriers (bind memo off)", (1u << diag::StrictBarriersOn) | (1u << diag::BindMemoOff)},
+    {"whole buffers (bind memo off)", (1u << diag::WholeBuffersOn) | (1u << diag::BindMemoOff)},
+    {"synchronous readbacks", 1u << diag::SyncReadbackOn},
     {"bind memo off", 1u << diag::BindMemoOff},
+    {"SRT patches off", 1u << diag::SrtPatchesOff},
     {"target cache off", 1u << diag::TargetCacheOff},
     {"texture lookup cache off", 1u << diag::TextureLookupOff},
-    {"all five off", (1u << diag::ShadowCopyOff) | (1u << diag::SrtPatchesOff) |
-                         (1u << diag::BindMemoOff) | (1u << diag::TargetCacheOff) |
-                         (1u << diag::TextureLookupOff)},
+    {"all of them", AllOff},
     {"LOD statistics on", 1u << diag::LodStatsOn},
     {"as launched again", 0},
 };

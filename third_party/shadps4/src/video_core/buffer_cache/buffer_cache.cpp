@@ -23,6 +23,7 @@
 #include <vk_mem_alloc.h>
 #include "perf_temp.h" // sotcport TEMP
 #include "diag/memory_types.h"
+#include "diag/toggles.h" // sotcport: F7 diagnostics
 
 namespace VideoCore {
 
@@ -173,7 +174,11 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         return;
     }
     static const bool async = std::getenv("SOTC_ASYNC_READBACK") != nullptr;
-    if (!async) {
+    if (!async || diag::On(diag::SyncReadbackOn)) {
+        if (async) {
+            // Switched to synchronous while running (F7): the bytes may still be on their way.
+            WaitForReadbacks(device_addr, size);
+        }
         liverpool->SendCommand<true>(std::move(flush_request));
         return;
     }
